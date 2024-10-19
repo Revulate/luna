@@ -1,0 +1,19 @@
+{
+    "ignore": [
+      "*.json",
+      "*.db*",
+      "*.log",
+      "steam_game.db*",
+      "node_modules/*",
+      "tokens.json",
+      "steam_game.db-journal"
+    ],
+    "ext": "js",
+    "watch": [
+      "*.js",
+      "*.cjs",
+      "commands/*.js",
+      "services/*.js"
+    ],
+    "delay": "5000"
+  }

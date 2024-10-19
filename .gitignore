@@ -1,0 +1,57 @@
+# Node modules
+node_modules/
+
+# Logs
+*.log
+
+# Environment variables
+.env
+
+# SQLite database
+tokens.db
+
+# Credentials
+credentials.json
+
+# ffmpeg-static
+ffmpeg-static/  
+
+*.mp4
+*.mp3
+*.wav
+*.ogg
+*.flac
+*.m4a
+*.webm
+*.aac
+*.opus
+*.m4p
+*.m4b
+*.m4r
+*.m4v
+*.mov
+*.mpg
+*.mpeg
+*.mp2
+*.mpa
+*.mpe
+*.mpv
+*.mxf
+*.m4s
+*.m4r
+*.m4v
+*.m4p
+*.m4b
+*.m4r
+*.m4v
+
+*.log
+*-audit.json
+*.cursorignore
+
+*.db
+*.db-shm
+*.db-wal    
+
+
+tokens.json
