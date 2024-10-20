@@ -23,7 +23,7 @@ export const config = {
     path: process.env.DB_PATH || './bot.db'
   },
   logging: {
-    level: process.env.LOG_LEVEL || 'info'
+    level: process.env.LOG_LEVEL || 'debug'
   },
   google: {
     sheetId: process.env.GOOGLE_SHEET_ID,

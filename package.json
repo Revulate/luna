@@ -5,7 +5,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node --prof index.mjs",
+    "start": "node --prof index.js",
     "dev": "nodemon index.mjs",
     "process-profile": "node process-profile.js",
     "postinstall": "playwright install"
@@ -19,6 +19,7 @@
     "@twurple/eventsub-ws": "^7.2.0",
     "@twurple/pubsub": "^7.2.0",
     "backoff": "^2.5.0",
+    "better-sqlite3": "^11.4.0",
     "canvas": "^2.11.2",
     "date-fns": "^4.1.0",
     "date-fns-tz": "^3.2.0",

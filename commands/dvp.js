@@ -1,5 +1,4 @@
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
+import Database from 'better-sqlite3';
 import { google } from 'googleapis';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
@@ -11,10 +10,9 @@ import { JWT } from 'google-auth-library';
 import validators from 'validator';
 import { parse, format } from 'date-fns';
 import NodeCache from 'node-cache';
-import { runQuery, getQuery, allQuery } from '../database.js';
-import JSONStream from 'jsonstream/index.js';  // Change to lowercase
+import JSONStream from 'jsonstream/index.js';
 import { pipeline } from 'stream/promises';
-import { config } from '../config.js';  // Import config
+import { config } from '../config.js';
 
 dotenv.config();
 
@@ -70,6 +68,9 @@ class DVP {
 
     this.verifyGoogleCredentials();
     this.initializeCog();
+
+    this.preparedStatements = {};
+    this._prepareStatements();  // Call this method to initialize prepared statements
   }
 
   async verifyGoogleCredentials() {
@@ -87,6 +88,7 @@ class DVP {
   async initializeCog() {
     logger.info('DVP module is initializing');
     await this.setupDatabase();
+    this._prepareStatements();  // Add this line
     await this.loadLastScrapeTime();
     await this.initializeData();
     await this.loadImageUrlCache();
@@ -97,12 +99,9 @@ class DVP {
   async setupDatabase() {
     logger.info(`Setting up database at ${this.dbPath}`);
     try {
-      this.db = await open({
-        filename: this.dbPath,
-        driver: sqlite3.Database
-      });
+      this.db = new Database(this.dbPath, { verbose: logger.debug });
 
-      await this.db.exec(`
+      this.db.exec(`
         CREATE TABLE IF NOT EXISTS games (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT NOT NULL UNIQUE,
@@ -112,12 +111,14 @@ class DVP {
         )
       `);
 
-      await this.db.exec(`
+      this.db.exec(`
         CREATE TABLE IF NOT EXISTS metadata (
           key TEXT PRIMARY KEY,
           value TEXT
         )
       `);
+
+      this._prepareStatements();
 
       logger.info('Database setup complete');
     } catch (error) {
@@ -126,8 +127,23 @@ class DVP {
     }
   }
 
+  _prepareStatements() {
+    this.preparedStatements = {
+      insertGame: this.db.prepare(`
+        INSERT OR REPLACE INTO games (name, time_played, last_played, image_url)
+        VALUES (?, ?, ?, ?)
+      `),
+      selectGame: this.db.prepare('SELECT * FROM games WHERE name = ?'),
+      updateGameImageUrl: this.db.prepare('UPDATE games SET image_url = ? WHERE name = ?'),
+      selectAllGames: this.db.prepare('SELECT * FROM games ORDER BY time_played DESC'),
+      getMetadata: this.db.prepare('SELECT value FROM metadata WHERE key = ?'),
+      setMetadata: this.db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)'),
+      selectActiveGames: this.db.prepare('SELECT * FROM games WHERE image_url IS NOT NULL')
+    };
+  }
+
   async loadLastScrapeTime() {
-    const result = await this.db.get("SELECT value FROM metadata WHERE key = 'last_scrape_time'");
+    const result = this.preparedStatements.getMetadata.get('last_scrape_time');
     if (result) {
       try {
         this.lastScrapeTime = new Date(result.value);
@@ -141,7 +157,7 @@ class DVP {
 
   async saveLastScrapeTime() {
     const currentTime = new Date().toISOString();
-    await this.db.run("INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)", ['last_scrape_time', currentTime]);
+    this.preparedStatements.setMetadata.run('last_scrape_time', currentTime);
     this.lastScrapeTime = new Date(currentTime);
     logger.info(`Last scrape time saved: ${this.lastScrapeTime}`);
   }
@@ -206,13 +222,7 @@ class DVP {
           logger.info(`Processed data - Name: ${name}, Time played: ${timePlayed} minutes (${this.formatPlaytime(timePlayed)}), Last played: ${lastPlayed}`);
 
           if (name) {
-            await this.db.run(`
-              INSERT INTO games (name, time_played, last_played, image_url)
-              VALUES (?, ?, ?, NULL)
-              ON CONFLICT(name) DO UPDATE SET
-                time_played = excluded.time_played,
-                last_played = excluded.last_played
-            `, [name, timePlayed, lastPlayed]);
+            this.preparedStatements.insertGame.run(name, timePlayed, lastPlayed, null);
           } else {
             logger.warning('Skipping row due to empty game name');
           }
@@ -232,7 +242,7 @@ class DVP {
   async loadImageUrlCache() {
     logger.info('Loading image URL cache from database');
     try {
-      const rows = await this.db.all("SELECT name, image_url FROM games WHERE image_url IS NOT NULL");
+      const rows = this.preparedStatements.selectActiveGames.all();
       for (const { name, image_url } of rows) {
         this.imageUrlCache.set(name, image_url);
       }
@@ -304,7 +314,7 @@ class DVP {
 
   async saveGameImageUrl(gameName, url) {
     try {
-      await this.db.run("UPDATE games SET image_url = ? WHERE name = ?", [url, gameName]);
+      this.preparedStatements.updateGameImageUrl.run(url, gameName);
       logger.info(`Saved image URL for '${gameName}' to database.`);
     } catch (error) {
       logger.error(`Error saving image URL to database for '${gameName}': ${error}`);
@@ -314,7 +324,7 @@ class DVP {
   async updateGoogleSheet() {
     logger.info('Starting Google Sheet update...');
     try {
-      const games = await this.db.all("SELECT * FROM games ORDER BY time_played DESC");
+      const games = this.preparedStatements.selectAllGames.all();
       logger.info(`Retrieved ${games.length} games from the database`);
 
       const rows = await Promise.all(games.map(async (game, index) => {
@@ -324,7 +334,7 @@ class DVP {
           try {
             imageUrl = await this.twitchApi.getGameImageUrl(game.name);
             if (imageUrl) {
-              await this.db.run("UPDATE games SET image_url = ? WHERE name = ?", [imageUrl, game.name]);
+              this.preparedStatements.updateGameImageUrl.run(imageUrl, game.name);
             }
           } catch (error) {
             logger.error(`Error fetching image URL for ${game.name}: ${error}`);
@@ -475,7 +485,7 @@ class DVP {
 
       // If not found in abbreviations, try fuzzy matching
       if (gameNameToSearch === gameName) {
-        const games = await this.db.all("SELECT name FROM games");
+        const games = this.preparedStatements.selectAllGames.all();
         const gameNames = games.map(g => g.name);
         const matches = fuzzball.extract(gameName, gameNames, { scorer: fuzzball.token_set_ratio, limit: 1 });
         if (matches.length > 0 && matches[0][1] > 80) {
@@ -483,7 +493,7 @@ class DVP {
         }
       }
 
-      const result = await this.db.get("SELECT time_played, last_played FROM games WHERE name = ?", gameNameToSearch);
+      const result = this.preparedStatements.selectGame.get(gameNameToSearch);
 
       if (result) {
         const { time_played, last_played } = result;
@@ -558,13 +568,7 @@ class DVP {
 
   async updateGameInfo(gameName, timePlayed, lastPlayed) {
     try {
-      await this.db.run(`
-        INSERT INTO games (name, time_played, last_played)
-        VALUES (?, ?, ?)
-        ON CONFLICT(name) DO UPDATE SET
-          time_played = ?,
-          last_played = ?
-      `, [gameName, timePlayed, lastPlayed, timePlayed, lastPlayed]);
+      this.preparedStatements.insertGame.run(gameName, timePlayed, lastPlayed, null);
       logger.info(`Updated info for ${gameName}: Time played: ${this.formatPlaytime(timePlayed)}, Last played: ${lastPlayed}`);
     } catch (error) {
       logger.error(`Error updating info for ${gameName}: ${error}`);
@@ -665,4 +669,3 @@ export function setupDvp(bot) {
     sheet: (context) => dvp.handleSheetCommand(context),
   };
 }
-

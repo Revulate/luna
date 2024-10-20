@@ -1,5 +1,4 @@
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
+import Database from 'better-sqlite3';
 import { config } from './config.js';
 import logger from './logger.js';
 
@@ -9,22 +8,19 @@ class DatabasePool {
     this.maxConnections = maxConnections;
   }
 
-  async getConnection() {
+  getConnection() {
     if (this.pool.length > 0) {
       return this.pool.pop();
     }
     if (this.pool.length + 1 <= this.maxConnections) {
-      const db = await open({
-        filename: config.database.path,
-        driver: sqlite3.Database
-      });
-      await db.run('PRAGMA journal_mode = WAL;');
+      const db = new Database(config.database.path, { verbose: logger.debug });
+      db.pragma('journal_mode = WAL');
       return db;
     }
     throw new Error('Max connections reached');
   }
 
-  async releaseConnection(db) {
+  releaseConnection(db) {
     this.pool.push(db);
   }
 }
@@ -35,15 +31,12 @@ let db; // Define db variable
 
 export async function initializeDatabase() {
   try {
-    db = await open({
-      filename: config.database.path,
-      driver: sqlite3.Database
-    });
+    db = new Database(config.database.path, { verbose: logger.debug });
 
     // Enable WAL mode for better concurrency
-    await db.run('PRAGMA journal_mode = WAL;');
+    db.pragma('journal_mode = WAL');
 
-    await db.exec(`
+    db.exec(`
       CREATE TABLE IF NOT EXISTS user_stats (
         user_id TEXT PRIMARY KEY,
         username TEXT,
@@ -65,53 +58,53 @@ export async function initializeDatabase() {
   }
 }
 
-export async function incrementMessageCount(userId, username) {
+export function incrementMessageCount(userId, username) {
   try {
     const now = new Date().toISOString();
-    await db.run(`
+    db.prepare(`
       INSERT INTO user_stats (user_id, username, message_count, first_seen, last_seen)
       VALUES (?, ?, 1, ?, ?)
       ON CONFLICT(user_id) DO UPDATE SET
         message_count = message_count + 1,
         last_seen = ?
-    `, [userId, username, now, now, now]);
+    `).run(userId, username, now, now, now);
   } catch (error) {
     logger.error('Error incrementing message count:', error);
   }
 }
 
-export async function getUserStats(userId) {
+export function getUserStats(userId) {
   try {
-    return await db.get('SELECT * FROM user_stats WHERE user_id = ?', userId);
+    return db.prepare('SELECT * FROM user_stats WHERE user_id = ?').get(userId);
   } catch (error) {
     logger.error('Error getting user stats:', error);
     return null;
   }
 }
 
-export async function runQuery(query, params = []) {
-  const connection = await dbPool.getConnection();
+export function runQuery(query, params = []) {
+  const connection = dbPool.getConnection();
   try {
-    return await connection.run(query, params);
+    return connection.prepare(query).run(...params);
   } finally {
-    await dbPool.releaseConnection(connection);
+    dbPool.releaseConnection(connection);
   }
 }
 
-export async function getQuery(query, params = []) {
-  const connection = await dbPool.getConnection();
+export function getQuery(query, params = []) {
+  const connection = dbPool.getConnection();
   try {
-    return await connection.get(query, params);
+    return connection.prepare(query).get(...params);
   } finally {
-    await dbPool.releaseConnection(connection);
+    dbPool.releaseConnection(connection);
   }
 }
 
-export async function allQuery(query, params = []) {
-  const connection = await dbPool.getConnection();
+export function allQuery(query, params = []) {
+  const connection = dbPool.getConnection();
   try {
-    return await connection.all(query, params);
+    return connection.prepare(query).all(...params);
   } finally {
-    await dbPool.releaseConnection(connection);
+    dbPool.releaseConnection(connection);
   }
 }

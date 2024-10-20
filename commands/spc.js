@@ -1,5 +1,4 @@
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
+import Database from 'better-sqlite3';
 import fetch from 'node-fetch';
 import { config } from '../config.js';
 import logger from '../logger.js';
@@ -25,53 +24,69 @@ class Spc {
     this.isInTransaction = false;
     this.isFetchingData = false;
     this.preparedStatements = {};
+    this.db = null;
+    this.FETCH_INTERVAL = 3 * 24 * 60 * 60 * 1000; // 3 days in milliseconds
   }
 
   async initialize() {
     await this._setupDatabase();
     await this._prepareStatements();
-    this.fetchGamesDataPeriodically();
+    await this.checkAndFetchGamesData();
     this.logger.info("Spc module initialized.");
   }
 
   async _setupDatabase() {
-    this.db = await open({
-      filename: this.dbPath,
-      driver: sqlite3.Database
-    });
+    this.db = new Database(this.dbPath, { verbose: this.logger.debug });
 
-    await this.db.exec(`
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS Steam_Game (
         ID INTEGER PRIMARY KEY,
         Name TEXT NOT NULL,
         LastUpdated INTEGER
       );
       CREATE INDEX IF NOT EXISTS idx_name ON Steam_Game(Name);
+
+      CREATE TABLE IF NOT EXISTS games (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        time_played INTEGER NOT NULL,
+        last_played TEXT NOT NULL,
+        image_url TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS last_fetch (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        timestamp INTEGER NOT NULL
+      );
     `);
-    this.logger.info("Steam_Game table and index set up.");
+    this.logger.info("Steam_Game, games, and last_fetch tables and index set up.");
   }
 
   async _prepareStatements() {
-    this.preparedStatements.insertGame = await this.db.prepare(
-      'INSERT OR REPLACE INTO Steam_Game (ID, Name, LastUpdated) VALUES (?, ?, ?)'
-    );
-    this.preparedStatements.findGameByName = await this.db.prepare(
-      'SELECT ID, Name FROM Steam_Game WHERE Name LIKE ?'
-    );
+    this.preparedStatements = {
+      insertGame: this.db.prepare('INSERT OR REPLACE INTO Steam_Game (ID, Name, LastUpdated) VALUES (?, ?, ?)'),
+      findGameByName: this.db.prepare('SELECT ID, Name FROM Steam_Game WHERE Name LIKE ?'),
+      getAllGames: this.db.prepare('SELECT name, image_url FROM games WHERE image_url IS NOT NULL'),
+      getLastFetch: this.db.prepare('SELECT timestamp FROM last_fetch WHERE id = 1'),
+      updateLastFetch: this.db.prepare('INSERT OR REPLACE INTO last_fetch (id, timestamp) VALUES (1, ?)')
+    };
   }
 
-  async fetchGamesDataPeriodically() {
-    while (true) {
-      try {
-        this.logger.info('Starting periodic Steam games data fetch');
-        await this.fetchSteamGamesData();
-        this.logger.info('Periodic Steam games data fetch completed. Sleeping for 24 hours.');
-        await setTimeoutPromise(24 * 60 * 60 * 1000);
-      } catch (error) {
-        this.logger.error('Error in periodic Steam games data fetch:', error);
-        await setTimeoutPromise(60 * 60 * 1000); // 1 hour retry on error
-      }
+  async checkAndFetchGamesData() {
+    const lastFetch = this.preparedStatements.getLastFetch.get();
+    const currentTime = Date.now();
+
+    if (!lastFetch || (currentTime - lastFetch.timestamp) >= this.FETCH_INTERVAL) {
+      this.logger.info('Starting Steam games data fetch');
+      await this.fetchSteamGamesData();
+      this.preparedStatements.updateLastFetch.run(currentTime);
+      this.logger.info('Steam games data fetch completed');
+    } else {
+      this.logger.info('Skipping Steam games data fetch, last fetch was recent');
     }
+
+    // Schedule the next check
+    setTimeout(() => this.checkAndFetchGamesData(), this.FETCH_INTERVAL);
   }
 
   async fetchSteamGamesData() {
@@ -94,31 +109,18 @@ class Spc {
       
       const jsonParser = jsonStream.parse('applist.apps.*');  // Use lowercase here as well
       
-      await this.db.run('BEGIN TRANSACTION');
+      await this.db.exec('BEGIN TRANSACTION');
       
       await new Promise((resolve, reject) => {
         pipeline(
           response.body,
           jsonParser,
           async function (source) {
-            const batchSize = 1000;
-            let batch = [];
-            const currentTime = Date.now();
-            
             for await (const game of source) {
               const { appid, name } = game;
               if (appid && name) {
-                batch.push([appid, name, currentTime]);
-                
-                if (batch.length >= batchSize) {
-                  await this._insertBatch(batch);
-                  batch = [];
-                }
+                this.preparedStatements.insertGame.run(appid, name, Date.now());
               }
-            }
-            
-            if (batch.length > 0) {
-              await this._insertBatch(batch);
             }
           }.bind(this)
         )
@@ -126,21 +128,14 @@ class Spc {
         .catch(reject);
       });
 
-      await this.db.run('COMMIT');
+      await this.db.exec('COMMIT');
       
       this.logger.info("Steam games data updated successfully.");
     } catch (error) {
-      await this.db.run('ROLLBACK');
+      await this.db.exec('ROLLBACK');
       this.logger.error(`Error updating the database: ${error}`, error);
     } finally {
       this.isFetchingData = false;
-    }
-  }
-
-  async _insertBatch(batch) {
-    const stmt = this.preparedStatements.insertGame;
-    for (const [appid, name, timestamp] of batch) {
-      await stmt.run(appid, name, timestamp);
     }
   }
 
@@ -399,12 +394,6 @@ export function setupSpc(bot) {
   const spc = new Spc(bot);
   spc.initialize();
   
-  setTimeout(() => {
-    spc.fetchGamesDataPeriodically().catch(error => {
-      logger.error('Error in fetchGamesDataPeriodically:', error);
-    });
-  }, 5000); // 5 seconds delay
-
   return {
     spc: async (context) => await spc.handleSpcCommand(context),
   };

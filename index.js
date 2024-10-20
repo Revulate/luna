@@ -20,7 +20,6 @@ import { initializeDatabase } from './database.js';
 import { config } from './config.js';
 import { setupCommands } from './commands/index.js';
 import { setupAfk } from './commands/afk.js';
-import { setupRate } from './commands/rate.js';
 import { setupEventSub } from './eventSub.js';
 import { setTimeout as setTimeoutPromise } from 'timers/promises';
 import { isMod, isVip } from './utils.js';
@@ -182,7 +181,13 @@ async function main() {
 
     const commandHandlers = {};
 
-    const afkHandlers = setupAfk(bot);
+    // Set up AFK handlers
+    const afkHandlers = await setupAfk(bot);
+    Object.entries(afkHandlers).forEach(([command, handler]) => {
+      if (command !== 'handleMessage') {
+        commandHandlers[command] = handler;
+      }
+    });
 
     await setupCommands(bot);
     await setTimeoutPromise(500); // 0.5 second delay

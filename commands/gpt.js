@@ -1,8 +1,7 @@
 import OpenAI from 'openai';
 import { config } from '../config.js';
 import logger from '../logger.js';
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
+import Database from 'better-sqlite3';
 import fetch from 'node-fetch';
 import sharp from 'sharp';
 import ffmpeg from 'fluent-ffmpeg';
@@ -58,11 +57,8 @@ class GptHandler {
 
   async setupDatabase() {
     try {
-      this.db = await open({
-        filename: this.dbPath,
-        driver: sqlite3.Database
-      });
-      await this.db.exec(`
+      this.db = new Database(this.dbPath, { verbose: logger.debug });
+      this.db.exec(`
         CREATE TABLE IF NOT EXISTS user_histories (
           user_id TEXT PRIMARY KEY,
           history TEXT NOT NULL
@@ -79,7 +75,7 @@ class GptHandler {
       return this.userHistoriesCache.get(userId);
     }
     try {
-      const row = await this.db.get("SELECT history FROM user_histories WHERE user_id = ?", userId);
+      const row = this.db.prepare("SELECT history FROM user_histories WHERE user_id = ?").get(userId);
       if (row) {
         const history = JSON.parse(row.history);
         this.userHistoriesCache.set(userId, history);
@@ -97,7 +93,7 @@ class GptHandler {
     if (history.length % 5 === 0) {
       try {
         const historyStr = JSON.stringify(history);
-        await this.db.run("REPLACE INTO user_histories (user_id, history) VALUES (?, ?)", userId, historyStr);
+        this.db.prepare("REPLACE INTO user_histories (user_id, history) VALUES (?, ?)").run(userId, historyStr);
       } catch (error) {
         logger.error('Error updating user history:', error);
       }
