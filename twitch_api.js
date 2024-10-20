@@ -1,12 +1,9 @@
 import { ApiClient } from '@twurple/api';
-import { StaticAuthProvider } from '@twurple/auth';
 import logger from './logger.js';
-import { config } from './config.js';
 
 class TwitchAPI {
-  constructor() {
-    const authProvider = new StaticAuthProvider(config.twitch.clientId, config.twitch.accessToken);
-    this.apiClient = new ApiClient({ authProvider });
+  constructor(apiClient) {
+    this.apiClient = apiClient;
   }
 
   async getStreams(userLogins) {
@@ -56,6 +53,28 @@ class TwitchAPI {
       logger.error(`Error fetching image URL for ${gameName}: ${error}`);
     }
     return "";
+  }
+  async getUserBadges(channelId, userInfo) {
+    try {
+      await this.apiClient.chat.getChannelBadges(channelId);
+
+      return {
+        isMod: userInfo.isMod,
+        isVip: userInfo.isVip,
+        isBroadcaster: userInfo.isBroadcaster,
+        isSubscriber: userInfo.isSubscriber,
+        badges: userInfo.badges ? Array.from(userInfo.badges.keys()) : []
+      };
+    } catch (error) {
+      logger.error(`Failed to fetch user badges: ${error}`);
+      return {
+        isMod: false,
+        isVip: false,
+        isBroadcaster: false,
+        isSubscriber: false,
+        badges: []
+      };
+    }
   }
 }
 

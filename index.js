@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 import { promises as fsPromises } from 'fs';
+import backoff from 'backoff';
 
 const envPath = path.resolve(process.cwd(), '.env');
 if (fs.existsSync(envPath)) {
@@ -25,6 +26,7 @@ import { setTimeout as setTimeoutPromise } from 'timers/promises';
 import { isMod, isVip } from './utils.js';
 import { commandQueue } from './commandQueue.js';
 import { gracefulShutdown } from './utils.js';
+import TwitchAPI from './twitch_api.js';
 
 const broadcasterUsername = process.env.BROADCASTER_USERNAME;
 
@@ -46,6 +48,24 @@ logger.debug('Relevant environment variables:', {
   BROADCASTER_USER_ID: process.env.BROADCASTER_USER_ID,
   DB_PATH: process.env.DB_PATH,
   LOG_LEVEL: process.env.LOG_LEVEL,
+});
+
+let isReconnecting = false;
+
+let reconnectBackoff = backoff.exponential({
+  initialDelay: 1000,
+  maxDelay: 60000
+});
+
+reconnectBackoff.on('ready', async () => {
+  try {
+    await chatClient.connect();
+    reconnectBackoff.reset();
+    isReconnecting = false;
+  } catch (error) {
+    logger.error(`Failed to reconnect: ${error}`);
+    reconnectBackoff.backoff();
+  }
 });
 
 async function main() {
@@ -72,31 +92,95 @@ async function main() {
 
     await authProvider.addUserForToken(tokenData, ['chat']);
 
-    const apiClient = new ApiClient({ authProvider });
-    const chatClient = new ChatClient({ authProvider, channels: config.twitch.channels });
+    const apiClient = new ApiClient({ authProvider, scopes: ['chat:read'] });
+    const chatClient = new ChatClient({
+      authProvider,
+      channels: config.twitch.channels,
+      isAlwaysMod: true, // Set this to true to ignore some rate limits
+      requestMembershipEvents: true
+    });
 
-    try {
-      const user = await apiClient.users.getUserByName(config.twitch.botUsername);
-      logger.info(`Successfully connected to Twitch API. Bot user ID: ${user.id}`);
-    } catch (error) {
-      logger.error(`Failed to connect to Twitch API: ${error}`);
-      throw error;
-    }
+    const twitchAPI = new TwitchAPI(apiClient);
 
-    const commandHandlers = {};
-
+    // Define bot object
     const bot = {
       api: apiClient,
       chat: chatClient,
-      say: (channel, message) => {
+      say: async (channel, message, options = {}) => {
         const formattedChannel = channel.startsWith('#') ? channel : `#${channel}`;
         logger.log('botMessage', `[BOT MESSAGE] ${formattedChannel}: ${message}`);
-        return chatClient.say(channel, message);
+        return chatClient.say(channel, message, options);
       },
       addCommand: (command, handler) => {
         commandHandlers[command] = handler;
       }
     };
+
+    // Function to determine if the bot should ignore rate limits
+    async function determineIsAlwaysMod() {
+      const channelStatuses = await Promise.all(config.twitch.channels.map(channel => checkBotStatus(channel, apiClient)));
+      return channelStatuses.every(status => status.isMod || status.isVip);
+    }
+
+    // Update the bot's say method to use dynamic privilege status
+    bot.say = async (channel, message, options = {}) => {
+      const formattedChannel = channel.startsWith('#') ? channel : `#${channel}`;
+      logger.log('botMessage', `[BOT MESSAGE] ${formattedChannel}: ${message}`);
+
+      const isAlwaysMod = await determineIsAlwaysMod();
+      if (isAlwaysMod || options.ignoreRateLimit) {
+        return chatClient.say(channel, message, options);
+      } else {
+        // Implement a simple rate limiter
+        await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5 second delay
+        return chatClient.say(channel, message);
+      }
+    };
+
+    // Get the bot's user information
+    const botUser = await apiClient.users.getUserByName(config.twitch.botUsername);
+    if (!botUser) {
+      throw new Error(`Could not find bot user: ${config.twitch.botUsername}`);
+    }
+
+    // Helper function to check bot status in a channel
+    async function checkBotStatus(channel, apiClient) {
+      try {
+        const channelUser = await apiClient.users.getUserByName(channel);
+        if (!channelUser) {
+          logger.warn(`Could not get user info for ${channel}`);
+          return { channel, isMod: false, isVip: false };
+        }
+
+        const channelBadges = await apiClient.chat.getChannelBadges(channelUser.id);
+
+        let isMod = false;
+        let isVip = false;
+
+        // Check if the bot has moderator or VIP badge
+        channelBadges.forEach(badgeSet => {
+          if (badgeSet.id === 'moderator') {
+            isMod = badgeSet.versions.some(version => version.id === '1');
+          }
+          if (badgeSet.id === 'vip') {
+            isVip = badgeSet.versions.some(version => version.id === '1');
+          }
+        });
+
+        return { channel, isMod, isVip };
+      } catch (error) {
+        logger.error(`Error checking bot status for ${channel}: ${error.message}`);
+        return { channel, isMod: false, isVip: false };
+      }
+    }
+
+    // Check the bot's status in each channel
+    const channelStatuses = await Promise.all(config.twitch.channels.map(checkBotStatus));
+
+    // Instead of updating the ChatClient, we'll use this information when needed
+    const isAlwaysMod = channelStatuses.every(status => status.isMod);
+
+    const commandHandlers = {};
 
     const afkHandlers = setupAfk(bot);
 
@@ -121,44 +205,68 @@ async function main() {
 
     chatClient.onConnect(() => {
       logger.info('Bot connected to Twitch chat');
+      isReconnecting = false;
     });
 
     chatClient.onDisconnect((manual, reason) => {
       logger.info(`Bot disconnected from Twitch chat. Manual: ${manual}, Reason: ${reason || 'No reason provided'}`);
-      // Attempt to reconnect
-      setTimeoutPromise(5000).then(() => chatClient.connect());
+      if (!manual && !isReconnecting) {
+        isReconnecting = true;
+        logger.info('Attempting to reconnect...');
+        reconnectBackoff.backoff();
+      }
     });
 
-    chatClient.onMessage((channel, user, message, msg) => {
+    chatClient.onMessage(async (channel, user, message, msg) => {
       const formattedChannel = channel.startsWith('#') ? channel : `#${channel}`;
       logger.info(`[MESSAGE] ${formattedChannel} @${user}: ${message}`);
       if (user === chatClient.currentNick) return;
 
-      const userInfo = {
-        userId: msg.userInfo.userId,
-        username: user,
-        displayName: msg.userInfo.displayName,
-        isMod: msg.userInfo.isMod,
-        isVip: msg.userInfo.isVip,
-        isBroadcaster: msg.userInfo.isBroadcaster
-      };
+      try {
+        const channelUser = await apiClient.users.getUserByName(channel.replace('#', ''));
+        if (!channelUser) {
+          logger.warn(`Could not get user info for channel: ${channel}`);
+          return;
+        }
 
-      if (message.startsWith('#')) {
-        const [command, ...args] = message.slice(1).split(' ');
-        if (['afk', 'sleep', 'gn', 'work', 'food', 'gaming', 'bed'].includes(command)) {
-          commandQueue.add(() => afkHandlers.handleAfkCommand({ channel, user: userInfo, args, command }));
-        } else if (command === 'rafk') {
-          commandQueue.add(() => afkHandlers.handleRafkCommand({ channel, user: userInfo }));
-        } else {
+        const userBadgeInfo = await twitchAPI.getUserBadges(channelUser.id, msg.userInfo);
+
+        const userInfo = {
+          userId: msg.userInfo.userId,
+          username: user,
+          displayName: msg.userInfo.displayName,
+          isMod: userBadgeInfo.isMod,
+          isVip: userBadgeInfo.isVip,
+          isBroadcaster: userBadgeInfo.isBroadcaster,
+          isSubscriber: userBadgeInfo.isSubscriber,
+          badges: userBadgeInfo.badges
+        };
+
+        const isPrivilegedUser = userInfo.isBroadcaster || userInfo.isMod || userInfo.isVip;
+
+        if (message.startsWith('#')) {
+          const [command, ...args] = message.slice(1).split(' ');
           const handler = commandHandlers[command];
           if (handler) {
-            commandQueue.add(() => handler({ channel, user: userInfo, message: msg, args, bot }));
-          } else {
-            logger.info(`Unknown command: ${command}`);
+            const context = { 
+              channel, 
+              user: userInfo, 
+              message: msg, 
+              args, 
+              bot: {
+                ...bot,
+                say: (ch, msg, opts = {}) => chatClient.say(ch, msg, { ...opts, ignoreRateLimit: isPrivilegedUser })
+              },
+              isPrivilegedUser
+            };
+            await handler(context);
           }
+        } else {
+          await afkHandlers.handleMessage(channel, userInfo, message);
         }
-      } else {
-        commandQueue.add(() => afkHandlers.handleMessage(channel, userInfo, message));
+
+      } catch (error) {
+        logger.error(`Error processing message: ${error.message}`);
       }
     });
 

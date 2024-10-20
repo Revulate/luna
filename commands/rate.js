@@ -64,13 +64,6 @@ class Rate {
 
   async handleRateCommand({ channel, user, args, bot }) {
     const mentionedUser = this.getMentionedUser(user, args[0]);
-    const now = Date.now();
-    const lastUse = this.rateLimiter.get(user.userId) || 0;
-    if (now - lastUse < 5000) { // 5 seconds cooldown
-      return;
-    }
-    this.rateLimiter.set(user.userId, now);
-
     const rateInfo = this.generateRateInfo(10, 5);
     const response = `I would give @${mentionedUser} a ${rateInfo.percentage}/10. ${rateInfo.percentage > 5 ? 'CHUG' : 'Hmm'}`;
     await this.sendMessage(bot, channel, response);
@@ -102,7 +95,7 @@ class Rate {
     await this.sendMessage(bot, channel, response);
   }
 
-  async handleAllCommand({ channel, user, args }) {
+  async handleAllCommand({ channel, user, args, bot, isPrivilegedUser }) {
     const mentionedUser = this.getMentionedUser(user, args[0]);
     logger.info(`Running all rate commands for @${mentionedUser}`);
 
@@ -118,10 +111,19 @@ class Rate {
     ];
 
     try {
-      // Use Promise.all to send all messages concurrently
-      await Promise.all(messages.map(message => 
-        this.chatClient.say(channel, message, { ignoreRateLimit: true })
-      ));
+      if (isPrivilegedUser) {
+        // Send messages rapidly for privileged users
+        const promises = messages.map(message => 
+          this.chatClient.say(channel, message, { ignoreRateLimit: true })
+        );
+        await Promise.all(promises);
+      } else {
+        // For non-privileged users, send messages with a small delay
+        for (const message of messages) {
+          await this.chatClient.say(channel, message);
+          await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay between messages
+        }
+      }
       
       logger.info(`Successfully sent all messages for #all command in ${channel}`);
       messages.forEach(msg => logger.botMessage(`${channel}: ${msg}`));
@@ -133,7 +135,6 @@ class Rate {
   async sendMessage(bot, channel, message) {
     try {
       await bot.say(channel, message);
-      // Remove logging here to avoid duplicate logs
     } catch (error) {
       logger.error(`Error sending message to ${channel}: ${error.message}`);
     }
