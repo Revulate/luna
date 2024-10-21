@@ -7,7 +7,7 @@ import { ChatClient } from '@twurple/chat';
 import logger from './logger.js';
 import { initializeDatabase } from './database.js';
 import { config } from './config.js';
-import { setupCommands } from './commands/index.js';
+import { setupCommands } from './commands/commandSetup.js';
 import { setupAfk } from './commands/afk.js';
 import TwitchAPI from './twitch_api.js';
 import { botStatusManager } from './BotStatusManager.js';
