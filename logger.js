@@ -15,7 +15,7 @@ const logger = winston.createLogger({
   format: winston.format.combine(
     winston.format.timestamp(),
     winston.format.printf(({ level, message, timestamp }) => {
-      if (message.startsWith('[MESSAGE]') || message.startsWith('[BOT MESSAGE]')) {
+      if (typeof message === 'string' && (message.startsWith('[MESSAGE]') || message.startsWith('[BOT MESSAGE]'))) {
         return `${timestamp} ${message}`;
       }
       return `${timestamp} [${level.toUpperCase()}] ${message}`;

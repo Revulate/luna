@@ -4,16 +4,20 @@ import { setupDvp } from './dvp.js';
 import { setupGpt } from './gpt.js';
 import { setupSpc } from './spc.js';
 import { setupPreview } from './preview.js';
+import { setupStats } from './stats.js';
+import { setupMessageLookup } from './messageLookup.js';
 import logger from '../logger.js';
 
-export async function setupCommands(bot) {
+export async function setupCommands(bot, twitchAPI) {
   logger.info('Starting setupCommands function');
   const commandSetups = [
     setupRate,
     setupDvp,
     setupGpt,
     setupSpc,
-    setupPreview
+    setupPreview,
+    setupStats,
+    setupMessageLookup,
   ];
 
   const registeredCommands = new Set();
@@ -45,6 +49,9 @@ export async function setupCommands(bot) {
       logger.warn(`AFK Command '${name}' already registered, skipping duplicate`);
     }
   });
+
+  const gptCommands = setupGpt(bot, twitchAPI);
+  Object.entries(gptCommands).forEach(([name, handler]) => bot.addCommand(name, handler));
 
   logger.info('All commands registered successfully');
   logger.debug(`Registered commands: ${Array.from(registeredCommands).join(', ')}`);

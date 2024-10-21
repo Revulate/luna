@@ -2,6 +2,7 @@ import { ApiClient } from '@twurple/api';
 import { AppTokenAuthProvider } from '@twurple/auth';
 import logger from './logger.js';
 import { config } from './config.js';
+import MessageLogger from './MessageLogger.js';
 
 class TwitchAPI {
   constructor() {
@@ -123,6 +124,20 @@ class TwitchAPI {
       throw new Error(`Could not find channel with name: ${channelName}`);
     }
     return user.id;
+  }
+
+  async getRecentChannelMessages(channel, count) {
+    try {
+      const messages = MessageLogger.getRecentMessages(channel.replace('#', ''), count);
+      return messages.map(msg => ({
+        user: { name: msg.username },
+        message: msg.message,
+        timestamp: msg.timestamp
+      }));
+    } catch (error) {
+      logger.error(`Failed to fetch recent messages for channel ${channel}: ${error.message}`);
+      return [];
+    }
   }
 }
 

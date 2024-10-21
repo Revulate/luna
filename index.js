@@ -11,6 +11,8 @@ import { setupCommands } from './commands/commandSetup.js';
 import { setupAfk } from './commands/afk.js';
 import TwitchAPI from './twitch_api.js';
 import { botStatusManager } from './BotStatusManager.js';
+import MessageLogger from './MessageLogger.js';
+import { setupGpt } from './commands/gpt.js';
 
 dotenv.config();
 
@@ -49,6 +51,10 @@ async function initializeTokensFile() {
     }
   }
 }
+
+// Add this line near the top of the file
+let lastCommandTime = 0;
+const commandCooldown = 5000; // 5 seconds cooldown after a command
 
 async function main() {
   try {
@@ -94,18 +100,28 @@ async function main() {
       api: apiClient,
       commands: {}, // Store commands
       addCommand: function(name, handler) {
-        if (!this.commands[name]) {
-          this.commands[name] = handler;
-          // Remove this line: logger.debug(`Command '${name}' registered`);
-        } else {
-          logger.warn(`Command '${name}' already exists, not overwriting`);
-        }
+        this.commands[name] = async (context) => {
+          await handler(context);
+          lastCommandTime = Date.now(); // Set the last command time
+        };
+      },
+      // Add this new method
+      getChannels: function() {
+        return config.twitch.channels;
+      },
+      getLastCommandTime: function() {
+        return lastCommandTime;
       },
     };
 
     // Setup commands
-    const { handleAfkMessage } = await setupCommands(bot);
+    const { handleAfkMessage } = await setupCommands(bot, twitchAPI);
     bot.handleAfkMessage = handleAfkMessage;
+
+    const gptCommands = setupGpt(bot, twitchAPI);
+    
+    // Add the gpt command to the bot's commands
+    bot.addCommand('gpt', gptCommands.gpt);
 
     chatClient.onConnect(() => {
       logger.info('Bot connected to Twitch chat');
@@ -125,9 +141,9 @@ async function main() {
     });
 
     chatClient.onMessage(async (channel, user, message, msg) => {
-      const badges = msg.userInfo.badges ? Array.from(msg.userInfo.badges.keys()) : [];
-      botStatusManager.updateStatus(channel, badges);
-      logger.debug(`Updated bot status for ${channel} with badges: ${badges.join(', ')}`);
+      // Use a Map for faster lookups
+      const badgeSet = new Set(msg.userInfo.badges ? msg.userInfo.badges.keys() : []);
+      botStatusManager.updateStatus(channel, badgeSet);
 
       const formattedChannel = channel.startsWith('#') ? channel : `#${channel}`;
       logger.info(`[MESSAGE] ${formattedChannel} @${user}: ${message}`);
@@ -135,19 +151,21 @@ async function main() {
       try {
         const userInfo = await twitchAPI.getUserInfo(channel, msg.userInfo);
 
+        // Log the message
+        MessageLogger.logMessage(channel.replace('#', ''), msg.userInfo.userId, user, message);
+
         if (message.startsWith('#')) {
           const [command, ...args] = message.slice(1).split(' ');
-          logger.debug(`Attempting to execute command: ${command}`);
           const handler = bot.commands[command];
           if (handler) {
-            logger.debug(`Handler found for command: ${command}`);
             await handler({ channel, user: userInfo, message: msg, args, bot });
-          } else {
-            logger.debug(`No handler found for command: ${command}`);
           }
         } else {
           await bot.handleAfkMessage(channel, userInfo, message);
         }
+
+        // Trigger the autonomous chat check
+        await gptCommands.tryGenerateAndSendMessage(channel);
       } catch (error) {
         logger.error(`Error processing message: ${error.message}`);
       }

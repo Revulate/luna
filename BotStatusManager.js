@@ -8,9 +8,14 @@ class BotStatusManager {
 
   updateStatus(channel, badges) {
     const channelName = channel.replace('#', '');
-    const canBypassRateLimit = badges.includes('moderator') || badges.includes('vip') || badges.includes('broadcaster');
+    let canBypassRateLimit = false;
+
+    if (typeof badges === 'object' && badges !== null) {
+      canBypassRateLimit = 'moderator' in badges || 'vip' in badges || 'broadcaster' in badges;
+    }
+
     this.channelStatuses.set(channelName, canBypassRateLimit);
-    logger.debug(`Updated bot status in ${channelName}: Can bypass rate limit: ${canBypassRateLimit}, Badges: ${badges.join(', ')}`);
+    logger.debug(`Updated bot status in ${channelName}: Can bypass rate limit: ${canBypassRateLimit}, Badges: ${JSON.stringify(badges)}`);
   }
 
   canBypassRateLimit(channel) {
@@ -23,7 +28,6 @@ class BotStatusManager {
   async customRateLimit(channel) {
     const channelName = channel.replace('#', '');
     if (this.canBypassRateLimit(channelName)) {
-      logger.debug(`Bypassing rate limit for ${channelName} (Mod/VIP/Broadcaster)`);
       return;
     }
 
@@ -31,14 +35,11 @@ class BotStatusManager {
     const lastTime = this.lastMessageTime.get(channelName) || 0;
     const timeSinceLastMessage = now - lastTime;
 
-    if (timeSinceLastMessage < 1200) { // 1.2 second rate limit to be safe
-      const waitTime = 1200 - timeSinceLastMessage;
-      logger.debug(`Applying custom rate limit for ${channelName}. Waiting ${waitTime}ms`);
-      await new Promise(resolve => setTimeout(resolve, waitTime));
+    if (timeSinceLastMessage < 1200) {
+      await new Promise(resolve => setTimeout(resolve, 1200 - timeSinceLastMessage));
     }
 
     this.lastMessageTime.set(channelName, now);
-    logger.debug(`Updated last message time for ${channelName}: ${now}`);
   }
 
   async applyRateLimit(channel) {
