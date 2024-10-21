@@ -1,8 +1,10 @@
 import winston from 'winston';
 import 'winston-daily-rotate-file';
 
+const logLevel = process.env.LOG_LEVEL || 'debug';
+
 const logger = winston.createLogger({
-  level: 'debug', // Set this to the most verbose level temporarily
+  level: logLevel,
   levels: {
     error: 0,
     warn: 1,

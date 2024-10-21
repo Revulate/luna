@@ -453,9 +453,9 @@ class GptHandler {
     return null;
   }
 
-  async handleGptCommand(channel, userInfo, args, msg, chatClient) {
+  async handleGptCommand(channel, userInfo, args, msg) {
     if (!args || args.length === 0) {
-      await chatClient.say(channel, `@${userInfo?.displayName || 'User'}, please provide a message after the #gpt command.`);
+      await this.bot.say(channel, `@${userInfo?.displayName || 'User'}, please provide a message after the #gpt command.`);
       return;
     }
 
@@ -471,7 +471,7 @@ class GptHandler {
     try {
       const cachedResponse = this.getFromCache(userInfo?.userId, prompt);
       if (cachedResponse) {
-        await this.sendResponse(channel, userInfo, cachedResponse, chatClient);
+        await this.sendResponse(channel, userInfo, cachedResponse);
         return;
       }
 
@@ -503,13 +503,13 @@ class GptHandler {
 
       if (response) {
         this.addToCache(userInfo?.userId, prompt, response);
-        await this.sendResponse(channel, userInfo, response, chatClient);
+        await this.sendResponse(channel, userInfo, response);
       } else {
         throw new Error("Failed to get response from OpenAI");
       }
     } catch (error) {
       logger.error(`Error processing '#gpt' command from ${userInfo?.username || 'Unknown'}:`, error);
-      await chatClient.say(channel, `@${userInfo?.displayName || 'User'}, an error occurred while processing your request.`);
+      await this.bot.say(channel, `@${userInfo?.displayName || 'User'}, an error occurred while processing your request.`);
     } finally {
       this.processingCommands.delete(commandKey);
     }
@@ -535,7 +535,7 @@ class GptHandler {
     return response;
   }
 
-  async sendResponse(channel, user, response, bot) {
+  async sendResponse(channel, user, response) {
     const cleanedResponse = this.removeDuplicateSentences(response);
     const mentionLength = `@${user.username}, `.length;
     const maxLength = 500 - mentionLength;
@@ -544,7 +544,7 @@ class GptHandler {
     for (const msg of messagesToSend) {
       const fullMsg = `@${user.username}, ${msg}`;
       try {
-        await bot.say(channel, fullMsg);
+        await this.bot.say(channel, fullMsg);
         // Log the bot's response
         logger.info(`[BOT GPT RESPONSE] ${channel}: ${fullMsg}`);
       } catch (error) {
@@ -715,6 +715,6 @@ function ensureAbsoluteUrl(url) {
 export function setupGpt(bot) {
   const gptHandler = new GptHandler(bot);
   return {
-    gpt: (context) => gptHandler.handleGptCommand(context.channel, context.user, context.args, context.message, bot.chat),
+    gpt: (context) => gptHandler.handleGptCommand(context.channel, context.user, context.args, context.message),
   };
 }

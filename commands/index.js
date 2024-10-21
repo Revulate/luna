@@ -8,7 +8,6 @@ import logger from '../logger.js';
 
 export async function setupCommands(bot) {
   const commandSetups = [
-    setupAfk,
     setupRate,
     setupDvp,
     setupGpt,
@@ -17,11 +16,21 @@ export async function setupCommands(bot) {
   ];
 
   for (const setup of commandSetups) {
-    const commands = setup(bot);
+    const commands = await setup(bot);
     Object.entries(commands).forEach(([name, handler]) => {
       bot.addCommand(name, handler);
+      logger.debug(`Command '${name}' registered`);
     });
   }
 
+  // Setup AFK commands separately
+  const { handleMessage: handleAfkMessage, ...afkCommands } = await setupAfk(bot);
+  Object.entries(afkCommands).forEach(([name, handler]) => {
+    bot.addCommand(name, handler);
+    logger.debug(`AFK Command '${name}' registered`);
+  });
+  bot.handleAfkMessage = handleAfkMessage;
+
   logger.info('All commands registered successfully');
+  logger.debug(`Registered commands: ${Object.keys(bot.commands).join(', ')}`);
 }

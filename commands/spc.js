@@ -25,6 +25,7 @@ class Spc {
     this.isFetchingData = false;
     this.preparedStatements = {};
     this.db = null;
+    this.dbConnection = null;
     this.FETCH_INTERVAL = 3 * 24 * 60 * 60 * 1000; // 3 days in milliseconds
   }
 
@@ -32,11 +33,14 @@ class Spc {
     await this._setupDatabase();
     await this._prepareStatements();
     await this.checkAndFetchGamesData();
+    setInterval(() => this.clearOldCacheEntries(), 3600000); // Clear old cache entries every hour
     this.logger.info("Spc module initialized.");
   }
 
   async _setupDatabase() {
     this.db = new Database(this.dbPath, { verbose: this.logger.debug });
+    // No need to create a connection, better-sqlite3 manages it internally
+    this.dbConnection = this.db; // Use the db instance directly
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS Steam_Game (
@@ -68,7 +72,11 @@ class Spc {
       findGameByName: this.db.prepare('SELECT ID, Name FROM Steam_Game WHERE Name LIKE ?'),
       getAllGames: this.db.prepare('SELECT name, image_url FROM games WHERE image_url IS NOT NULL'),
       getLastFetch: this.db.prepare('SELECT timestamp FROM last_fetch WHERE id = 1'),
-      updateLastFetch: this.db.prepare('INSERT OR REPLACE INTO last_fetch (id, timestamp) VALUES (1, ?)')
+      updateLastFetch: this.db.prepare('INSERT OR REPLACE INTO last_fetch (id, timestamp) VALUES (1, ?)'),
+      bulkInsertGames: this.db.prepare(`
+        INSERT OR REPLACE INTO Steam_Game (ID, Name, LastUpdated)
+        VALUES (@id, @name, @lastUpdated)
+      `)
     };
   }
 
@@ -107,10 +115,13 @@ class Spc {
         headers: { 'Accept-Encoding': 'gzip,deflate' }
       });
       
-      const jsonParser = jsonStream.parse('applist.apps.*');  // Use lowercase here as well
+      const jsonParser = jsonStream.parse('applist.apps.*');
       
       await this.db.exec('BEGIN TRANSACTION');
       
+      const gameBatch = [];
+      const batchSize = 1000;
+
       await new Promise((resolve, reject) => {
         pipeline(
           response.body,
@@ -119,8 +130,15 @@ class Spc {
             for await (const game of source) {
               const { appid, name } = game;
               if (appid && name) {
-                this.preparedStatements.insertGame.run(appid, name, Date.now());
+                gameBatch.push({ id: appid, name, lastUpdated: Date.now() });
+                if (gameBatch.length >= batchSize) {
+                  await this._bulkInsertGames(gameBatch);
+                  gameBatch.length = 0;
+                }
               }
+            }
+            if (gameBatch.length > 0) {
+              await this._bulkInsertGames(gameBatch);
             }
           }.bind(this)
         )
@@ -139,19 +157,29 @@ class Spc {
     }
   }
 
+  async _bulkInsertGames(games) {
+    const transaction = this.db.transaction((games) => {
+      const stmt = this.preparedStatements.bulkInsertGames;
+      for (const game of games) {
+        stmt.run(game);
+      }
+    });
+    transaction(games);
+  }
+
   async handleSpcCommand({ channel, user, args, bot }) {
-    const username = user.username || 'Unknown User';
-    const userId = user.userId || 'Unknown ID';
+    const username = user.username || user.name || user['display-name'] || 'Unknown User';
+    const userId = user.userId || user.id || 'Unknown ID';
     this.logger.info(`[MESSAGE] Processing #spc command from ${username} (ID: ${userId})`);
 
     if (!this.steamApiKey) {
-      await bot.say(channel, `@${user}, Steam API key is not configured.`);
+      await bot.say(channel, `@${username}, Steam API key is not configured.`);
       return;
     }
 
     const { gameID, skipReviews, gameName } = this.parseArguments(args);
     if (gameID === null && gameName === null) {
-      await bot.say(channel, `@${user}, please provide a game ID or name.`);
+      await bot.say(channel, `@${username}, please provide a game ID or name.`);
       return;
     }
 
@@ -159,7 +187,7 @@ class Spc {
     if (!finalGameID && gameName) {
       finalGameID = await this.findGameIdByName(gameName);
       if (!finalGameID) {
-        await bot.say(channel, `@${user}, no games found for your query: '${gameName}'.`);
+        await bot.say(channel, `@${username}, no games found for your query: '${gameName}'.`);
         return;
       }
       this.logger.debug(`Game name provided. Found Game ID: ${finalGameID}`);
@@ -167,14 +195,14 @@ class Spc {
 
     const playerCount = await this.getCurrentPlayerCount(finalGameID);
     if (playerCount === null) {
-      await bot.say(channel, `@${user}, could not retrieve player count for game ID ${finalGameID}.`);
+      await bot.say(channel, `@${username}, could not retrieve player count for game ID ${finalGameID}.`);
       return;
     }
 
     const reviewsString = skipReviews ? "" : await this.getGameReviews(finalGameID);
     const gameDetails = await this.getGameDetails(finalGameID);
     if (!gameDetails) {
-      await bot.say(channel, `@${user}, could not retrieve details for game ID ${finalGameID}.`);
+      await bot.say(channel, `@${username}, could not retrieve details for game ID ${finalGameID}.`);
       return;
     }
 
@@ -367,11 +395,11 @@ class Spc {
         throw new Error(`Failed to fetch game details for App ID ${appId}: ${response.status}`);
       }
       const data = await response.json();
-      const gameData = data[appId]?.data;
-      if (!gameData) {
-        this.logger.error(`No data found for App ID ${appId}.`);
+      if (!data[appId] || !data[appId].success || !data[appId].data) {
+        this.logger.error(`No valid data found for App ID ${appId}.`);
         return null;
       }
+      const gameData = data[appId].data;
       const details = {
         name: gameData.name || "Unknown",
         developers: gameData.developers || []
@@ -388,11 +416,41 @@ class Spc {
       return null;
     }
   }
+
+  clearOldCacheEntries() {
+    const now = Date.now();
+    this.playerCountCache.forEach((value, key) => {
+      if (now - value.timestamp > this.PLAYER_COUNT_CACHE_EXPIRY) {
+        this.playerCountCache.delete(key);
+      }
+    });
+    this.reviewsCache.forEach((value, key) => {
+      if (now - value.timestamp > this.REVIEWS_CACHE_EXPIRY) {
+        this.reviewsCache.delete(key);
+      }
+    });
+    this.gameDetailsCache.forEach((value, key) => {
+      if (now - value.timestamp > this.GAME_DETAILS_CACHE_EXPIRY) {
+        this.gameDetailsCache.delete(key);
+      }
+    });
+  }
+
+  async cleanup() {
+    if (this.db) {
+      await this.db.close();
+      this.logger.info("Database connection closed.");
+    }
+  }
 }
 
 export function setupSpc(bot) {
   const spc = new Spc(bot);
   spc.initialize();
+  
+  process.on('exit', () => {
+    spc.cleanup();
+  });
   
   return {
     spc: async (context) => await spc.handleSpcCommand(context),

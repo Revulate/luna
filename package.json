@@ -6,18 +6,16 @@
   "type": "module",
   "scripts": {
     "start": "node --prof index.js",
-    "dev": "nodemon index.mjs",
+    "dev": "nodemon index.js",
     "process-profile": "node process-profile.js",
     "postinstall": "playwright install"
   },
   "dependencies": {
     "@twurple/api": "^7.2.0",
     "@twurple/auth": "^7.2.0",
-    "@twurple/chat": "^7.0.0",
-    "@twurple/common": "^7.2.0",
+    "@twurple/chat": "^7.2.0",
     "@twurple/easy-bot": "^7.0.0",
-    "@twurple/eventsub-ws": "^7.2.0",
-    "@twurple/pubsub": "^7.2.0",
+    "axios": "^1.7.7",
     "backoff": "^2.5.0",
     "better-sqlite3": "^11.4.0",
     "canvas": "^2.11.2",

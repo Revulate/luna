@@ -1,8 +1,10 @@
 import { DataObject } from '@twurple/common';
 import { config } from '../config.js';
 import logger from '../logger.js';
-import { isMod, isVip } from '../utils.js';
+import { isMod, isVip } from '../index.js';
 import { ChatClient } from '@twurple/chat';
+import { commandQueue } from '../commandQueue.js';
+import { botStatusManager } from '../BotStatusManager.js';
 
 class RateInfo extends DataObject {
   constructor(data) {
@@ -95,7 +97,7 @@ class Rate {
     await this.sendMessage(bot, channel, response);
   }
 
-  async handleAllCommand({ channel, user, args, bot, isPrivilegedUser }) {
+  async handleAllCommand({ channel, user, args, bot }) {
     const mentionedUser = this.getMentionedUser(user, args[0]);
     logger.info(`Running all rate commands for @${mentionedUser}`);
 
@@ -111,18 +113,10 @@ class Rate {
     ];
 
     try {
-      if (isPrivilegedUser) {
-        // Send messages rapidly for privileged users
-        const promises = messages.map(message => 
-          this.chatClient.say(channel, message, { ignoreRateLimit: true })
-        );
-        await Promise.all(promises);
-      } else {
-        // For non-privileged users, send messages with a small delay
-        for (const message of messages) {
-          await this.chatClient.say(channel, message);
-          await new Promise(resolve => setTimeout(resolve, 100)); // 100ms delay between messages
-        }
+      for (const message of messages) {
+        await this.sendMessage(bot, channel, message);
+        // Add a delay between messages
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
       
       logger.info(`Successfully sent all messages for #all command in ${channel}`);
@@ -134,9 +128,12 @@ class Rate {
 
   async sendMessage(bot, channel, message) {
     try {
+      await botStatusManager.applyRateLimit(channel);
       await bot.say(channel, message);
+      logger.debug(`Message sent to ${channel}: ${message}`);
     } catch (error) {
       logger.error(`Error sending message to ${channel}: ${error.message}`);
+      throw error;
     }
   }
 

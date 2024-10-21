@@ -1,5 +1,6 @@
 import { ApiClient } from '@twurple/api';
 import logger from './logger.js';
+import { config } from './config.js';
 
 class TwitchAPI {
   constructor(apiClient) {
@@ -28,7 +29,7 @@ class TwitchAPI {
     try {
       const user = await this.apiClient.users.getUserByName(channelName);
       if (!user) {
-        logger.warning(`Could not find user ID for channel: ${channelName}`);
+        logger.warn(`Could not find user ID for channel: ${channelName}`);
         return null;
       }
       const channel = await this.apiClient.channels.getChannelInfoById(user.id);
@@ -49,32 +50,77 @@ class TwitchAPI {
         return formattedUrl;
       }
       logger.warn(`No image found for game: ${gameName}`);
+      return null;
     } catch (error) {
       logger.error(`Error fetching image URL for ${gameName}: ${error}`);
+      return null;
     }
-    return "";
   }
-  async getUserBadges(channelId, userInfo) {
+
+  async getUserInfo(channel, userInfo) {
     try {
-      await this.apiClient.chat.getChannelBadges(channelId);
+      const badges = userInfo.badges ? Array.from(userInfo.badges.keys()) : [];
+      const isMod = badges.includes('moderator');
+      const isVip = badges.includes('vip');
+      const isBroadcaster = userInfo.isBroadcaster;
+
+      logger.debug(`Badges for user ${userInfo.userName} in channel ${channel}: ${badges.join(', ')}`);
+      logger.debug(`User ${userInfo.userName} isMod: ${isMod}, isVip: ${isVip}, isBroadcaster: ${isBroadcaster}`);
 
       return {
-        isMod: userInfo.isMod,
-        isVip: userInfo.isVip,
-        isBroadcaster: userInfo.isBroadcaster,
+        userId: userInfo.userId,
+        username: userInfo.userName,
+        displayName: userInfo.displayName,
+        isMod,
+        isVip,
+        isBroadcaster,
         isSubscriber: userInfo.isSubscriber,
-        badges: userInfo.badges ? Array.from(userInfo.badges.keys()) : []
+        badges,
       };
     } catch (error) {
-      logger.error(`Failed to fetch user badges: ${error}`);
+      logger.error(`Failed to get user info for ${userInfo.userName} in channel ${channel}: ${error.message}`);
       return {
+        userId: userInfo.userId,
+        username: userInfo.userName,
+        displayName: userInfo.displayName,
         isMod: false,
         isVip: false,
         isBroadcaster: false,
         isSubscriber: false,
-        badges: []
+        badges: [],
       };
     }
+  }
+
+  async getUserByName(username) {
+    try {
+      return await this.apiClient.users.getUserByName(username);
+    } catch (error) {
+      logger.error(`Failed to get user by name: ${error}`);
+      return null;
+    }
+  }
+
+  async getStreamByUsername(username) {
+    try {
+      const user = await this.getUserByName(username);
+      if (!user) {
+        logger.warn(`Could not find user: ${username}`);
+        return null;
+      }
+      return await this.apiClient.streams.getStreamByUserId(user.id);
+    } catch (error) {
+      logger.error(`Failed to get stream for user ${username}: ${error}`);
+      return null;
+    }
+  }
+
+  async getChannelId(channelName) {
+    const user = await this.apiClient.users.getUserByName(channelName);
+    if (!user) {
+      throw new Error(`Could not find channel with name: ${channelName}`);
+    }
+    return user.id;
   }
 }
 

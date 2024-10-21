@@ -71,6 +71,8 @@ class DVP {
 
     this.preparedStatements = {};
     this._prepareStatements();  // Call this method to initialize prepared statements
+
+    this.browser = null;
   }
 
   async verifyGoogleCredentials() {
@@ -94,6 +96,8 @@ class DVP {
     await this.loadImageUrlCache();
     this.startPeriodicScrapeUpdate();
     logger.info('DVP module initialized successfully');
+
+    this.browser = await chromium.launch({ headless: true });
   }
 
   async setupDatabase() {
@@ -138,7 +142,8 @@ class DVP {
       selectAllGames: this.db.prepare('SELECT * FROM games ORDER BY time_played DESC'),
       getMetadata: this.db.prepare('SELECT value FROM metadata WHERE key = ?'),
       setMetadata: this.db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)'),
-      selectActiveGames: this.db.prepare('SELECT * FROM games WHERE image_url IS NOT NULL')
+      selectActiveGames: this.db.prepare('SELECT * FROM games WHERE image_url IS NOT NULL'),
+      updateLastPlayed: this.db.prepare('UPDATE games SET last_played = ? WHERE name = ?'),
     };
   }
 
@@ -458,7 +463,7 @@ class DVP {
 
   async fetchMissingImages() {
     logger.info('Fetching missing images');
-    const games = await this.db.all("SELECT name FROM games WHERE image_url IS NULL");
+    const games = this.db.prepare("SELECT name FROM games WHERE image_url IS NULL").all();
     let imagesFetched = false;
     for (const game of games) {
       const imageUrl = await this.getGameImageUrl(game.name);
@@ -519,7 +524,7 @@ class DVP {
 
   async updateLastPlayedDate(gameName, lastPlayed) {
     try {
-      await this.db.run("UPDATE games SET last_played = ? WHERE name = ?", [lastPlayed, gameName]);
+      this.preparedStatements.updateLastPlayed.run(lastPlayed, gameName);
       logger.info(`Updated last played date for ${gameName} to ${lastPlayed}`);
     } catch (error) {
       logger.error(`Error updating last played date for ${gameName}: ${error}`);
@@ -528,15 +533,16 @@ class DVP {
 
   async updateLastPlayedDates() {
     logger.info('Updating last played dates');
-    const browser = await chromium.launch({ headless: true });
+    if (!this.browser) {
+      this.browser = await chromium.launch({ headless: true });
+    }
+    const context = await this.browser.newContext();
+    const page = await context.newPage();
     try {
-      const context = await browser.newContext();
-      const page = await context.newPage();
-
       await page.goto(`https://twitchtracker.com/${this.channelName}/games`);
       await page.waitForSelector('#games');
 
-      const existingEntries = await this.db.get("SELECT COUNT(*) as count FROM games");
+      const existingEntries = this.db.prepare("SELECT COUNT(*) as count FROM games").get();
       const numRowsToCheck = existingEntries.count > 0 ? 5 : -1;
 
       const rows = await page.$$('#games tbody tr');
@@ -562,7 +568,7 @@ class DVP {
     } catch (error) {
       logger.error(`Error updating last played dates: ${error}`);
     } finally {
-      await browser.close();
+      await context.close();
     }
   }
 
@@ -657,15 +663,24 @@ class DVP {
   }
 
   async fetchGameInfoFromDatabase(gameName) {
-    return await getQuery('SELECT * FROM games WHERE name = ?', [gameName]);
+    return this.preparedStatements.selectGame.get(gameName);
+  }
+
+  async cleanup() {
+    if (this.browser) {
+      await this.browser.close();
+    }
+    // Close database connection and perform other cleanup
   }
 }
 
 export function setupDvp(bot) {
   const dvp = new DVP(bot);
+  process.on('exit', () => dvp.cleanup());
   return {
     dvp: (context) => dvp.handleDvpCommand(context),
     dvpupdate: (context) => dvp.handleDvpUpdateCommand(context),
     sheet: (context) => dvp.handleSheetCommand(context),
   };
 }
+
