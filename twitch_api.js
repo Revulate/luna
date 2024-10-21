@@ -1,10 +1,12 @@
 import { ApiClient } from '@twurple/api';
+import { AppTokenAuthProvider } from '@twurple/auth';
 import logger from './logger.js';
 import { config } from './config.js';
 
 class TwitchAPI {
-  constructor(apiClient) {
-    this.apiClient = apiClient;
+  constructor() {
+    const authProvider = new AppTokenAuthProvider(config.twitch.clientId, config.twitch.clientSecret);
+    this.apiClient = new ApiClient({ authProvider });
   }
 
   async getStreams(userLogins) {

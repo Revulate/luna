@@ -468,7 +468,7 @@ class DVP {
     for (const game of games) {
       const imageUrl = await this.getGameImageUrl(game.name);
       if (imageUrl) {
-        await this.db.run("UPDATE games SET image_url = ? WHERE name = ?", [imageUrl, game.name]);
+        this.preparedStatements.updateGameImageUrl.run(imageUrl, game.name);
         this.imageUrlCache.set(game.name, imageUrl);
         imagesFetched = true;
       }
@@ -542,8 +542,8 @@ class DVP {
       await page.goto(`https://twitchtracker.com/${this.channelName}/games`);
       await page.waitForSelector('#games');
 
-      const existingEntries = this.db.prepare("SELECT COUNT(*) as count FROM games").get();
-      const numRowsToCheck = existingEntries.count > 0 ? 5 : -1;
+      const existingEntries = this.preparedStatements.selectAllGames.all();
+      const numRowsToCheck = existingEntries.length > 0 ? 5 : -1;
 
       const rows = await page.$$('#games tbody tr');
       const rowsToProcess = numRowsToCheck === -1 ? rows : rows.slice(0, numRowsToCheck);
@@ -683,4 +683,3 @@ export function setupDvp(bot) {
     sheet: (context) => dvp.handleSheetCommand(context),
   };
 }
-

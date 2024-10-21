@@ -117,7 +117,8 @@ class Spc {
       
       const jsonParser = jsonStream.parse('applist.apps.*');
       
-      await this.db.exec('BEGIN TRANSACTION');
+      // Start a transaction
+      this.db.exec('BEGIN TRANSACTION');
       
       const gameBatch = [];
       const batchSize = 1000;
@@ -146,11 +147,12 @@ class Spc {
         .catch(reject);
       });
 
-      await this.db.exec('COMMIT');
+      // Commit the transaction
+      this.db.exec('COMMIT');
       
       this.logger.info("Steam games data updated successfully.");
     } catch (error) {
-      await this.db.exec('ROLLBACK');
+      this.db.exec('ROLLBACK');
       this.logger.error(`Error updating the database: ${error}`, error);
     } finally {
       this.isFetchingData = false;
