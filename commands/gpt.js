@@ -989,7 +989,7 @@ Now, hit 'em with your response, Luna. Focus on answering the mention, incorpora
       }
     }
 
-    return '';  // Return an empty string if there's no content to analyze
+    return 'No content to analyze. The message does not contain any recognizable URLs or media content.';
   }
 
   async summarizeConversation(messages) {
@@ -1090,21 +1090,21 @@ Now, hit 'em with your response, Luna. Focus on answering the mention, incorpora
   shouldRespondToRecentMessages(channel, messages) {
     const botMentions = ['@tatsluna', 'tatsluna'];
     const lastMessage = messages[messages.length - 1];
-    const hasMention = lastMessage.message.toLowerCase().includes('@tatsluna') || 
-                       lastMessage.message.toLowerCase().includes('tatsluna');
+    const hasMention = botMentions.some(mention => lastMessage.message.toLowerCase().includes(mention));
 
     // Generate a unique ID for the last message
-    const lastMessageId = `${lastMessage.username}-${lastMessage.message}-${Date.now()}`;
+    const lastMessageId = this.hashString(`${lastMessage.username}-${lastMessage.message}`);
 
     // Check if we've already responded to this message
     if (this.lastRespondedMessageIds.get(channel) === lastMessageId) {
-      return false;
+        logger.debug(`Already responded to message ${lastMessageId} in channel ${channel}`);
+        return false;
     }
 
     // Always respond to direct mentions in any channel, regardless of cooldown
     if (hasMention) {
-      this.lastRespondedMessageIds.set(channel, lastMessageId);
-      return true;
+        this.lastRespondedMessageIds.set(channel, lastMessageId);
+        return true;
     }
 
     const currentTime = Date.now();
@@ -1113,26 +1113,26 @@ Now, hit 'em with your response, Luna. Focus on answering the mention, incorpora
 
     // Autonomous behavior only for the designated autonomy channel
     if (channel.toLowerCase() === this.autonomyChannel.toLowerCase()) {
-      // Check if enough time has passed since the last response
-      if (timeSinceLastResponse < this.cooldownPeriod) {
-        return false;
-      }
+        // Check if enough time has passed since the last response
+        if (timeSinceLastResponse < this.cooldownPeriod) {
+            return false;
+        }
 
-      const randomChance = Math.random() < 0.01; // 1% chance to respond randomly
-      
-      // Check for context-specific keywords that might warrant a response
-      const contextKeywords = ['oatmeal', 'recipe', 'starve'];
-      const hasRelevantContext = messages.some(msg => 
-        contextKeywords.some(keyword => msg.message.toLowerCase().includes(keyword))
-      );
+        const randomChance = Math.random() < 0.01; // 1% chance to respond randomly
+        
+        // Check for context-specific keywords that might warrant a response
+        const contextKeywords = ['oatmeal', 'recipe', 'starve'];
+        const hasRelevantContext = messages.some(msg => 
+            contextKeywords.some(keyword => msg.message.toLowerCase().includes(keyword))
+        );
 
-      logger.debug(`shouldRespondToRecentMessages for ${channel}: randomChance=${randomChance}, hasRelevantContext=${hasRelevantContext}, timeSinceLastResponse=${timeSinceLastResponse}`);
+        logger.debug(`shouldRespondToRecentMessages for ${channel}: randomChance=${randomChance}, hasRelevantContext=${hasRelevantContext}, timeSinceLastResponse=${timeSinceLastResponse}`);
 
-      // Respond if there's relevant context or random chance
-      if (hasRelevantContext || randomChance) {
-        this.lastRespondedMessageIds.set(channel, lastMessageId);
-        return true;
-      }
+        // Respond if there's relevant context or random chance
+        if (hasRelevantContext || randomChance) {
+            this.lastRespondedMessageIds.set(channel, lastMessageId);
+            return true;
+        }
     }
 
     // For non-autonomy channels, don't respond unless it's a direct mention (which was handled at the beginning)
