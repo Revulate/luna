@@ -94,13 +94,18 @@ async function main() {
       api: apiClient,
       commands: {}, // Store commands
       addCommand: function(name, handler) {
-        this.commands[name] = handler;
-        logger.debug(`Command '${name}' registered`);
+        if (!this.commands[name]) {
+          this.commands[name] = handler;
+          // Remove this line: logger.debug(`Command '${name}' registered`);
+        } else {
+          logger.warn(`Command '${name}' already exists, not overwriting`);
+        }
       },
     };
 
     // Setup commands
-    await setupCommands(bot);
+    const { handleAfkMessage } = await setupCommands(bot);
+    bot.handleAfkMessage = handleAfkMessage;
 
     chatClient.onConnect(() => {
       logger.info('Bot connected to Twitch chat');
