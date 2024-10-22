@@ -17,7 +17,7 @@
     "@twurple/easy-bot": "^7.0.0",
     "axios": "^1.7.7",
     "backoff": "^2.5.0",
-    "better-sqlite3": "^11.4.0",
+    "better-sqlite3": "^11.5.0",
     "canvas": "^2.11.2",
     "date-fns": "^4.1.0",
     "date-fns-tz": "^3.2.0",

@@ -1,9 +1,11 @@
 import { config } from '../config.js';
 import logger from '../logger.js';
+import TwitchAPI from '../twitch_api.js';
 
 class PreviewHandler {
   constructor(bot) {
     this.bot = bot;
+    this.twitchAPI = new TwitchAPI();
     this.clientId = config.twitch.clientId;
     this.clientSecret = config.twitch.clientSecret;
     if (!this.clientId || !this.clientSecret) {
@@ -13,12 +15,12 @@ class PreviewHandler {
 
   async getChannelInfo(channelName) {
     try {
-      const user = await this.bot.api.users.getUserByName(channelName);
+      const user = await this.twitchAPI.getUserByName(channelName);
       if (!user) return null;
 
-      const channel = await this.bot.api.channels.getChannelInfoById(user.id);
-      const stream = await this.bot.api.streams.getStreamByUserId(user.id);
-      const videos = await this.bot.api.videos.getVideosByUser(user.id, { type: 'archive', limit: 1 });
+      const channel = await this.twitchAPI.apiClient.channels.getChannelInfoById(user.id);
+      const stream = await this.twitchAPI.getStreamByUsername(channelName);
+      const videos = await this.twitchAPI.apiClient.videos.getVideosByUser(user.id, { type: 'archive', limit: 1 });
       const lastVideo = videos.data.length > 0 ? videos.data[0] : null;
 
       return { user, channel, stream, lastVideo };

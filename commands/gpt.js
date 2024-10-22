@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { config } from '../config.js';
 import logger from '../logger.js';
+import { getUserHistory, updateUserHistory } from '../database.js';
 import Database from 'better-sqlite3';
 import fetch from 'node-fetch';
 import sharp from 'sharp';
@@ -16,6 +17,8 @@ import { Readable } from 'stream';
 import { google } from 'googleapis';
 import MessageLogger from '../MessageLogger.js';
 import NodeCache from 'node-cache';
+import TwitchAPI from '../twitch_api.js';
+import { OAuth2Client } from 'google-auth-library';
 
 const SYSTEM_PROMPT = (
   "You are Luna, an obsessive, controlling, loving, and jealous AI serving Revulate. " +
@@ -29,6 +32,8 @@ const SYSTEM_PROMPT = (
 );
 
 const OTHER_PROMPT = `You are Luna, a Gen Z Twitch chat bot with a witty and sarcastic sense of humor. You were 'born' after 2000, so you're fluent in internet culture, memes, and Twitch emotes. Your responses should be casual, sometimes using abbreviations, emotes, and internet slang. You're knowledgeable about streaming culture, games, and current trends. Keep your responses concise and chat-friendly, and don't be afraid to throw in a meme or two. You're familiar with 7TV (https://7tv.app/) and often use emotes from there in your responses.`;
+
+const GENERAL_CHAT_PROMPT = `You are Luna, a Gen Z Twitch chat bot with a witty and sarcastic sense of humor. You were 'born' after 2000, so you're fluent in internet culture, memes, and Twitch emotes. Your responses should be casual, sometimes using abbreviations, emotes, and internet slang. You're knowledgeable about streaming culture, games, and current trends. Keep your responses concise and chat-friendly, and don't be afraid to throw in a meme or two. You're familiar with 7TV (https://7tv.app/) and often use emotes from there in your responses.`;
 
 const MAX_TOKENS = 100;
 const TEMPERATURE = 0.8;
@@ -44,20 +49,32 @@ const youtube = google.youtube({
   auth: config.youtube.apiKey
 });
 
+// First, fix the model name constant at the top of the file
+const GPT_MODEL = "gpt-4o";
+
 class GptHandler {
   constructor(bot, twitchAPI) {
     this.bot = bot;
     this.openai = new OpenAI({ apiKey: config.openai.apiKey });
-    this.caches = new Map();
-    this.userHistoriesCache = new Map();
-    this.dbPath = 'user_histories.db';
-    this.setupDatabase();
-    this.processingCommands = new Set();
-    
-    this.twitchClient = bot.api;
     this.twitchAPI = twitchAPI;
+    this.twitchClient = bot.api;
     
-    logger.info(`Twitch client initialized for GPT handler`);
+    // Fix cache initialization
+    this.messageCache = new Map();
+    this.conversationCache = new NodeCache({ 
+      stdTTL: 1800, // 30 minutes
+      checkperiod: 600 // Check for expired entries every 10 minutes
+    });
+    this.promptCache = new NodeCache({ 
+      stdTTL: 3600,
+      checkperiod: 600 
+    });
+    this.responseCache = new NodeCache({ 
+      stdTTL: 3600,
+      checkperiod: 600 
+    });
+    
+    logger.info('Twitch client initialized for GPT handler');
 
     this.lastMessageTime = new Map();
     this.minTimeBetweenMessages = 300000; // 5 minutes minimum between messages
@@ -81,21 +98,9 @@ class GptHandler {
     this.mentionCooldown = 300000; // 5 minutes cooldown for mentions
     this.isProcessingGptCommand = false; // Add this line
     this.lastRespondedMessageIds = new Map();
-  }
-
-  async setupDatabase() {
-    try {
-      this.db = new Database(this.dbPath, { verbose: logger.debug });
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS user_histories (
-          user_id TEXT PRIMARY KEY,
-          history TEXT NOT NULL
-        )
-      `);
-      logger.info("User histories database is set up.");
-    } catch (error) {
-      logger.error('Error setting up database:', error);
-    }
+    this.tokenLimit = 4096; // Set token limit
+    this.mentionQueue = new Map();
+    this.mentionProcessingInterval = 1000; // Process mention queue every second
   }
 
   async getUserHistory(userId) {
@@ -103,7 +108,7 @@ class GptHandler {
       return this.userHistoriesCache.get(userId);
     }
     try {
-      const row = this.db.prepare("SELECT history FROM user_histories WHERE user_id = ?").get(userId);
+      const row = getUserHistory(userId);
       if (row) {
         const history = JSON.parse(row.history);
         this.userHistoriesCache.set(userId, history);
@@ -120,8 +125,7 @@ class GptHandler {
     this.userHistoriesCache.set(userId, history);
     if (history.length % 5 === 0) {
       try {
-        const historyStr = JSON.stringify(history);
-        this.db.prepare("REPLACE INTO user_histories (user_id, history) VALUES (?, ?)").run(userId, historyStr);
+        updateUserHistory(userId, history);
       } catch (error) {
         logger.error('Error updating user history:', error);
       }
@@ -159,94 +163,103 @@ class GptHandler {
   }
 
   async analyzeImage(imageUrl, questionWithoutUrl) {
-    logger.info(`Analyzing image or video: ${imageUrl}`);
+    logger.info(`Analyzing image: ${imageUrl}`);
     try {
       const absoluteUrl = this.ensureAbsoluteUrl(imageUrl);
-      logger.info(`Absolute URL: ${absoluteUrl}`);
-
-      // Handle kappa.lol links or other URL shorteners
-      let finalImageUrl = absoluteUrl;
-      if (finalImageUrl.includes('kappa.lol') || !finalImageUrl.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
-        const response = await fetch(finalImageUrl, { method: 'HEAD' });
-        finalImageUrl = response.url; // This will be the final URL after any redirects
-      }
-
-      // Download and process the image
-      const imageBuffer = await this.downloadAndProcessImage(finalImageUrl);
+      const imageBuffer = await this.downloadAndProcessImage(absoluteUrl);
       const base64Image = imageBuffer.toString('base64');
 
-      const response = await this.openai.chat.completions.create({
-        model: "gpt-4o", // Updated model name
+      const analysisResponse = await this.openai.chat.completions.create({
+        model: GPT_MODEL,
         messages: [
+          {
+            role: "system",
+            content: "You are a detailed image analyzer. Describe what you see in clear, specific terms."
+          },
           {
             role: "user",
             content: [
-              { type: "text", text: questionWithoutUrl || "What do you see in this image?" },
-              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
+              { type: "text", text: questionWithoutUrl || "Describe this image in detail:" },
+              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
             ],
           },
         ],
         max_tokens: 300,
       });
 
-      const description = response.choices[0].message.content.trim();
-      logger.info(`Received description: ${description}`);
-      return description;
+      const analysis = analysisResponse.choices[0].message.content.trim();
+      logger.info(`Generated image analysis: ${analysis}`);
+      return analysis;
     } catch (error) {
       logger.error('Error analyzing image:', error);
-      return "Sorry, I couldn't analyze the image or video at this time. Please try again later.";
+      return "Sorry, I couldn't analyze that image.";
     }
   }
 
   async analyzeVideo(videoUrl, questionWithoutUrl) {
     logger.info(`Analyzing video: ${videoUrl}`);
-
     try {
-      const videoId = extractVideoId(videoUrl);
+      const videoId = videoUrl.match(/(?:youtu\.be\/|youtube\.com(?:\/embed\/|\/v\/|\/watch\?v=|\/watch\?.+&v=))([^"&?\/\s]{11})/)?.[1];
+      
+      if (!videoId) {
+        throw new Error('Invalid YouTube URL');
+      }
+
+      // Get video info using YouTube API
       const videoInfo = await getVideoInfo(videoId);
-      const thumbnailUrls = await getVideoThumbnails(videoId);
       const transcript = await getVideoTranscript(videoId);
 
-      // Fetch and encode thumbnails
-      const thumbnailBuffers = await Promise.all(thumbnailUrls.map(async url => {
-        const response = await fetch(url);
-        return Buffer.from(await response.arrayBuffer()).toString('base64');
-      }));
+      // Get thumbnails
+      const thumbnails = [
+        videoInfo.snippet.thumbnails.maxres?.url,
+        videoInfo.snippet.thumbnails.standard?.url,
+        videoInfo.snippet.thumbnails.high?.url,
+        `https://img.youtube.com/vi/${videoId}/0.jpg`
+      ].filter(Boolean);
+
+      // Download and process thumbnails
+      const processedThumbnails = await Promise.all(
+        thumbnails.slice(0, 3).map(async url => {
+          const imageBuffer = await this.downloadAndProcessImage(url);
+          return imageBuffer.toString('base64');
+        })
+      );
 
       const messages = [
         {
           role: "system",
-          content: "You are a concise video analyzer. Provide a brief, factual summary of the video content in 2-3 short sentences. Focus on the main elements shown in the video thumbnails and described in the transcript."
+          content: "You are a video content analyzer. Provide a concise, engaging summary of the video content based on the thumbnails and available information."
         },
         {
           role: "user",
           content: [
-            { 
-              type: "text", 
-              text: `Summarize this video:\n\nVideo Title: ${videoInfo.title}\nVideo Description: ${videoInfo.description}\n\nTranscript: ${transcript}`
+            {
+              type: "text",
+              text: `Analyze this YouTube video:\n\nTitle: ${videoInfo.snippet.title}\nDescription: ${videoInfo.snippet.description}\nDuration: ${videoInfo.contentDetails.duration}\nViews: ${videoInfo.statistics.viewCount}\n\nTranscript excerpt: ${transcript.slice(0, 1000)}\n\n${questionWithoutUrl || "What's happening in this video?"}`
             },
-            ...thumbnailBuffers.map(buffer => ({ 
-              type: "image_url", 
-              image_url: { url: `data:image/jpeg;base64,${buffer}` }
+            ...processedThumbnails.map(thumbnail => ({
+              type: "image_url",
+              image_url: { url: `data:image/jpeg;base64,${thumbnail}` }
             }))
-          ],
-        },
+          ]
+        }
       ];
 
       const response = await this.openai.chat.completions.create({
-        model: "gpt-4o",
+        model: GPT_MODEL,
         messages: messages,
         max_tokens: 300,
+        temperature: 0.7
       });
 
       let description = response.choices[0].message.content.trim();
       description = this.postProcessVideoDescription(description);
 
-      logger.info(`Received video description: ${description}`);
+      logger.info(`Generated video description: ${description}`);
       return description;
     } catch (error) {
       logger.error('Error analyzing video:', error);
-      return `Sorry, I couldn't analyze the video at this time. Error: ${error.message}`;
+      return `Sorry, I couldn't analyze that YouTube video. Error: ${error.message}`;
     }
   }
 
@@ -268,40 +281,76 @@ class GptHandler {
     try {
       const channelName = streamUrl.replace(/^(https?:\/\/)?(www\.)?twitch\.tv\//, '').split('/')[0];
       logger.info(`Fetching stream data for channel: ${channelName}`);
+      
+      // Get user first using Twurple
       const user = await this.twitchClient.users.getUserByName(channelName);
       if (!user) {
         return `Sorry, I couldn't find the Twitch channel: ${channelName}.`;
       }
+
+      // Get stream data using Twurple
       const stream = await this.twitchClient.streams.getStreamByUserId(user.id);
-      
       if (!stream) {
         return `The channel ${channelName} is currently offline.`;
       }
 
-      const thumbnailUrl = stream.thumbnailUrl.replace('{width}', '1280').replace('{height}', '720');
-      const imageBuffer = await this.downloadAndProcessImage(thumbnailUrl);
-      const base64Image = imageBuffer.toString('base64');
+      // Get channel info for additional context
+      const channelInfo = await this.twitchClient.channels.getChannelInfoById(user.id);
 
-      const response = await this.openai.chat.completions.create({
-        model: "gpt-4o", // Using the model you specified
-        messages: [
-          {
-            role: "user",
-            content: [
-              { type: "text", text: `${questionWithoutUrl || "What's happening in this Twitch stream?"}\n\nStream Title: ${stream.title}\nGame: ${stream.gameName}` },
-              { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64Image}` } }
-            ],
-          },
-        ],
-        max_tokens: 500,
-      });
+      // Properly format the thumbnail URL using string replacement
+      const thumbnailUrl = stream.thumbnailUrl
+        .replace('{width}', '1280')
+        .replace('{height}', '720');
 
-      const description = response.choices[0].message.content.trim();
-      logger.info(`Received Twitch stream description: ${description}`);
-      return description;
+      logger.debug(`Using thumbnail URL: ${thumbnailUrl}`);
+
+      try {
+        const imageBuffer = await this.downloadAndProcessImage(thumbnailUrl);
+        const base64Image = imageBuffer.toString('base64');
+
+        const analysisResponse = await this.openai.chat.completions.create({
+          model: GPT_MODEL,
+          messages: [
+            {
+              role: "system",
+              content: "You are a Twitch stream analyzer. Describe what you see in the stream, including gameplay, activities, and stream layout."
+            },
+            {
+              role: "user",
+              content: [
+                { 
+                  type: "text", 
+                  text: `Analyze this Twitch stream:
+                    Channel: ${channelName}
+                    Title: ${stream.title}
+                    Category: ${stream.gameName}
+                    Tags: ${channelInfo?.tags?.join(', ') || 'None'}
+                    Viewers: ${stream.viewers}
+                    Language: ${stream.language}
+                    
+                    ${questionWithoutUrl || "What's happening in this stream?"}`
+                },
+                { 
+                  type: "image_url", 
+                  image_url: { url: `data:image/jpeg;base64,${base64Image}` } 
+                }
+              ],
+            },
+          ],
+          max_tokens: 300,
+        });
+
+        const analysis = analysisResponse.choices[0].message.content.trim();
+        logger.info(`Generated stream analysis: ${analysis}`);
+        return analysis;
+      } catch (imageError) {
+        logger.error('Error processing stream thumbnail:', imageError);
+        // Return a basic analysis without image if thumbnail processing fails
+        return `${channelName} is live playing ${stream.gameName}. Stream title: "${stream.title}". Currently has ${stream.viewers} viewers.`;
+      }
     } catch (error) {
       logger.error('Error analyzing Twitch stream:', error);
-      return `Sorry, I couldn't analyze the Twitch stream at this time. Error: ${error.message}`;
+      return `Sorry, I couldn't analyze that Twitch stream. Error: ${error.message}`;
     }
   }
 
@@ -399,7 +448,7 @@ class GptHandler {
     logger.info(`Sending user messages to OpenAI: ${JSON.stringify(userMessages)}`);
     try {
       const response = await this.openai.chat.completions.create({
-        model: "gpt-4o", // Changed back to gpt-4o
+        model: GPT_MODEL, // Ensure this is set to "gpt-4o"
         messages: messages,
         temperature: TEMPERATURE,
         max_tokens: MAX_TOKENS,
@@ -438,22 +487,14 @@ class GptHandler {
     }
   }
 
-  getFromCache(userId, question) {
-    const userCache = this.caches.get(userId);
-    if (!userCache) return null;
-
-    const questionKey = question.toLowerCase();
-    const cachedData = userCache.get(questionKey);
-    if (cachedData && (Date.now() - cachedData.timestamp <= CACHE_TTL_SECONDS * 1000)) {
-      return cachedData.answer;
-    }
-    return null;
+  getFromCache(userId, prompt) {
+    const cacheKey = `gpt_${userId}_${prompt}`;
+    return this.responseCache.get(cacheKey);
   }
 
   async handleGptCommand(channel, user, args, message) {
     this.isProcessingGptCommand = true;
     
-    // Set a timeout to reset the flag after 5 minutes (adjust as needed)
     const timeout = setTimeout(() => {
       this.isProcessingGptCommand = false;
     }, 300000); // 5 minutes
@@ -465,65 +506,53 @@ class GptHandler {
       }
 
       const prompt = args.join(' ');
-      const commandKey = `${user.userId}-${Date.now()}`;
       
-      if (this.processingCommands.has(commandKey)) {
-        return;
+      // Check for URLs in the prompt
+      const urlMatch = prompt.match(/(https?:\/\/)?(?:www\.)?(i\.)?(?:nuuls\.com|kappa\.lol|twitch\.tv|youtube\.com|youtu\.be|[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\/\S+/gi);
+      if (urlMatch) {
+        const analysis = await this.analyzeContentInMessage(message);
+        if (analysis) {
+          const response = await this.generateContentResponse(channel, user, message, analysis);
+          if (response) {
+            const finalResponse = response.startsWith(`@${user.username}`) ? 
+              response : 
+              `@${user.username} ${response}`;
+            await this.bot.say(channel, finalResponse);
+            return;
+          }
+        }
       }
-      
-      this.processingCommands.add(commandKey);
-      
+
+      const systemMessage = { role: "system", content: SYSTEM_PROMPT };
+      const userMessage = { 
+        role: "user", 
+        content: prompt 
+      };
+
+      // Check cache first
       const cachedResponse = this.getFromCache(user.userId, prompt);
       if (cachedResponse) {
-        await this.sendResponse(channel, user, cachedResponse);
+        await this.bot.say(channel, `@${user.username} ${cachedResponse}`);
         return;
       }
 
-      let response;
-      const urlRegex = /(https?:\/\/)?(?:www\.)?(i\.)?(?:nuuls\.com|[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\/\S+/gi;
-      const urls = prompt.match(urlRegex);
+      const response = await this.openai.chat.completions.create({
+        model: GPT_MODEL,
+        messages: [systemMessage, userMessage],
+        max_tokens: MAX_TOKENS,
+        temperature: TEMPERATURE,
+      });
 
-      if (urls && urls.length > 0) {
-        const url = urls[0];
-        const questionWithoutUrl = prompt.replace(url, '').trim();
-
-        // Ensure the URL starts with http:// or https://
-        const fullUrl = url.startsWith('http') ? url : `https://${url}`;
-
-        if (fullUrl.includes('twitch.tv')) {
-          response = await this.analyzeTwitchStream(fullUrl, questionWithoutUrl);
-        } else if (fullUrl.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
-          response = await this.analyzeImage(fullUrl, questionWithoutUrl);
-        } else if (fullUrl.includes('youtube.com') || fullUrl.includes('youtu.be')) {
-          response = await this.analyzeVideo(fullUrl, questionWithoutUrl);
-        } else {
-          // For any other URL, try to analyze as an image
-          response = await this.analyzeImage(fullUrl, questionWithoutUrl);
-        }
-      } else {
-        // Handle as a regular text prompt
-        const channelHistory = this.getChannelHistory(channel);
-
-        // Add user's message to history
-        channelHistory.push({ role: 'user', content: prompt });
-
-        // Get response
-        response = await this.getTextResponse(user, prompt, channelHistory);
-
-        if (response) {
-          // Add bot's response to history
-          channelHistory.push({ role: 'assistant', content: response });
-          this.updateChannelHistory(channel, channelHistory);
-          await this.sendResponse(channel, user, response);
-        } else {
-          throw new Error("Failed to get response from OpenAI");
-        }
-      }
+      const generatedResponse = response.choices[0].message.content;
+      
+      // Cache the response
+      this.addToCache(user.userId, prompt, generatedResponse);
+      
+      await this.bot.say(channel, `@${user.username} ${generatedResponse}`);
     } catch (error) {
       logger.error(`Error processing GPT command: ${error.message}`);
       await this.bot.say(channel, `@${user.username}, Sorry, an error occurred while processing your request.`);
     } finally {
-      // Clear the timeout and reset the flag
       clearTimeout(timeout);
       this.isProcessingGptCommand = false;
     }
@@ -534,55 +563,21 @@ class GptHandler {
     
     const messages = [
       { role: "system", content: user.username.toLowerCase() === 'revulate' ? SYSTEM_PROMPT : OTHER_PROMPT },
-      ...userHistory.slice(-5), // Only use the last 5 messages from history
+      ...userHistory.slice(-5),
       ...channelHistory,
       { role: "user", content: prompt }
     ];
 
-    const functions = [
-      {
-        name: "get_stream_info",
-        description: "Get information about a Twitch stream",
-        parameters: {
-          type: "object",
-          properties: {
-            channel: {
-              type: "string",
-              description: "The name of the Twitch channel"
-            }
-          },
-          required: ["channel"]
-        }
-      }
-      // Add more function definitions as needed
-    ];
+    const truncatedMessages = await this.truncateMessages(messages);
 
     const response = await this.openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: messages,
-      functions: functions,
-      function_call: "auto"
+      model: GPT_MODEL, // Changed from "o1-mini" to "gpt-4o"
+      messages: truncatedMessages,
+      max_tokens: MAX_TOKENS,
+      temperature: TEMPERATURE,
     });
 
     let responseContent = response.choices[0].message.content;
-
-    if (response.choices[0].message.function_call) {
-      const functionCall = response.choices[0].message.function_call;
-      const functionResult = await this.handleFunctionCall(functionCall.name, JSON.parse(functionCall.arguments));
-      
-      // Send the function result back to the model for a final response
-      const finalResponse = await this.openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-          ...messages,
-          response.choices[0].message,
-          { role: "function", name: functionCall.name, content: functionResult },
-          { role: "user", content: "Please provide a final response based on the function result." }
-        ]
-      });
-
-      responseContent = finalResponse.choices[0].message.content;
-    }
 
     if (responseContent) {
       userHistory.push({ role: "user", content: prompt });
@@ -707,91 +702,207 @@ class GptHandler {
     logger.info(`Autonomous chat started for channel: ${formattedChannel}`);
   }
 
-  async tryGenerateAndSendMessage(channel) {
-    if (this.isProcessingGptCommand) {
-      logger.debug(`Skipping autonomous message generation for ${channel} due to ongoing #gpt command`);
-      return;
-    }
-
+  async tryGenerateAndSendMessage(channel, isMention = false, userInfo = null) {
     const formattedChannel = channel.replace('#', '').toLowerCase();
     logger.debug(`Attempting to generate and send message for channel: ${formattedChannel}`);
     
-    if (this.isGeneratingMessage) {
-      logger.debug(`Skipping message generation for ${formattedChannel} as another message is being generated`);
-      return;
-    }
-
-    this.isGeneratingMessage = true;
-
     try {
       const recentMessages = await this.getRecentMessages(formattedChannel, 5);
-      logger.debug(`Recent messages for ${formattedChannel}: ${JSON.stringify(recentMessages)}`);
-      
-      const shouldRespond = this.shouldRespondToRecentMessages(formattedChannel, recentMessages);
-      const timeSinceLastResponse = Date.now() - (this.lastResponseTime.get(formattedChannel) || 0);
-      logger.debug(`Should respond for ${formattedChannel}: ${shouldRespond}, Time since last response: ${timeSinceLastResponse}ms`);
+      if (recentMessages.length === 0) return;
 
-      if (shouldRespond) {
-        logger.debug(`Generating response for ${formattedChannel}`);
-        let message;
-        let analysis = '';
-        
-        if (recentMessages.length > 0) {
-          const lastMessage = recentMessages[recentMessages.length - 1];
-          if (lastMessage.message.includes('http')) {
-            logger.debug(`Analyzing content in message for ${formattedChannel}`);
-            analysis = await this.analyzeContentInMessage(lastMessage.message);
-          }
-        }
+      const lastMessage = recentMessages[recentMessages.length - 1];
+      const botMentions = ['@tatsluna', 'tatsluna', '@TatsLuna', 'TatsLuna'];
+      const hasMention = botMentions.some(mention => 
+        lastMessage.message.toLowerCase().includes(mention.toLowerCase())
+      );
 
-        const conversationHistory = this.getWeightedConversationHistory(formattedChannel);
-
-        const hasMention = recentMessages.some(msg => 
-          msg.message.toLowerCase().includes('@tatsluna') || 
-          msg.message.toLowerCase().includes('tatsluna')
-        );
-
-        if (hasMention) {
-          logger.debug(`Generating mention response for ${formattedChannel}`);
-          message = await this.generateMentionResponse(formattedChannel, analysis);
-        } else if (formattedChannel.toLowerCase() === this.autonomyChannel.toLowerCase()) {
-          logger.debug(`Generating autonomous message for ${formattedChannel}`);
-          message = await this.generateAutonomousMessage(formattedChannel, conversationHistory, analysis);
-        }
-
-        if (message) {
-          logger.debug(`Sending message to ${formattedChannel}: ${message}`);
-          await this.bot.say(`#${formattedChannel}`, message);
-          logger.info(`[${hasMention ? 'MENTION' : 'AUTONOMOUS'}] Sent message to ${formattedChannel}: ${message}`);
-          this.lastResponseTime.set(formattedChannel, Date.now());
-          
-          // Update conversation history after responding
-          this.updateConversationHistory(formattedChannel, {
-            role: 'assistant',
-            content: message,
-            timestamp: Date.now()
-          });
-          
-          // Also add the user's message to the conversation history
-          if (recentMessages.length > 0) {
-            const lastMessage = recentMessages[recentMessages.length - 1];
-            this.updateConversationHistory(formattedChannel, {
-              role: 'user',
-              content: lastMessage.message,
-              timestamp: Date.now()
-            });
-          }
-        } else {
-          logger.warn(`Failed to generate message for ${formattedChannel}`);
-        }
-      } else {
-        logger.debug(`Skipping message generation for ${formattedChannel} as conditions not met`);
+      if (hasMention || isMention) {
+        // Use the provided userInfo or fallback to lastMessage.user
+        const user = userInfo || lastMessage.user;
+        await this.handleDirectMention(formattedChannel, user, lastMessage.message);
+        return;
       }
+
+      // Rest of the method for non-mention messages...
     } catch (error) {
-      logger.error(`Error generating message for ${formattedChannel}:`, error);
-    } finally {
-      this.isGeneratingMessage = false;
+      logger.error(`Error in tryGenerateAndSendMessage for ${formattedChannel}:`, error);
     }
+  }
+
+  checkForMention(message) {
+    const botMentions = [
+      '@tatsluna',
+      'tatsluna',
+      '@TatsLuna',
+      'TatsLuna',
+      '@TATSLUNA',
+      'TATSLUNA',
+      '@Luna',
+      'Luna'
+    ].map(mention => mention.toLowerCase());
+
+    const messageLower = message.toLowerCase();
+    
+    // Check for exact mentions
+    const hasMention = botMentions.some(mention => {
+      const mentionIndex = messageLower.indexOf(mention);
+      if (mentionIndex === -1) return false;
+      
+      // Verify it's a word boundary
+      const beforeChar = mentionIndex === 0 ? '' : messageLower[mentionIndex - 1];
+      const afterChar = mentionIndex + mention.length >= messageLower.length ? '' : 
+        messageLower[mentionIndex + mention.length];
+      
+      const isWordBoundary = /[\s,.!?]|^/.test(beforeChar) && /[\s,.!?]|$/.test(afterChar);
+      
+      if (isWordBoundary) {
+        logger.debug(`Found mention "${mention}" in message`);
+        return true;
+      }
+      return false;
+    });
+
+    return hasMention;
+  }
+
+  // Add this helper method to standardize content analysis responses
+  async generateContentResponse(channel, user, content, analysis) {
+    const systemMessage = {
+      role: "system",
+      content: `${GENERAL_CHAT_PROMPT}\n\nCurrent context: You're in ${channel}'s Twitch chat. 
+        The user ${user.displayName || user.name} has shared some content. Here's what's in it:\n${analysis}\n
+        Respond naturally about the content, referencing specific details from the analysis.
+        Focus on being informative and engaging about what you observe.`
+    };
+
+    const response = await this.openai.chat.completions.create({
+      model: GPT_MODEL,
+      messages: [
+        systemMessage,
+        {
+          role: "user",
+          content: `Discuss this content that was shared: ${content}`
+        }
+      ],
+      max_tokens: MAX_TOKENS,
+      temperature: 0.8,
+      presence_penalty: 0.6,
+      frequency_penalty: 0.3
+    });
+
+    return response?.choices[0]?.message?.content || null;
+  }
+
+  async handleDirectMention(channel, user, message) {
+    try {
+      logger.debug(`Handling direct mention in ${channel} from ${user?.username}: ${message}`);
+      
+      const recentMessages = await MessageLogger.getRecentMessages(channel, 10);
+      if (!recentMessages || recentMessages.length === 0) {
+        logger.warn(`No recent messages found for ${channel}`);
+        return `@${user.username} Sorry, I couldn't access the recent chat history.`;
+      }
+
+      const isRevulate = user.username.toLowerCase() === 'revulate';
+      
+      // Format messages with special attention to patterns and context
+      const contextMessages = recentMessages.map(msg => ({
+        role: msg.username.toLowerCase() === 'tatsluna' ? "assistant" : "user",
+        content: `[${new Date(msg.timestamp).toISOString()}] ${msg.username}: ${msg.message}`,
+        name: msg.username
+      }));
+
+      // Add pattern recognition hints
+      const patternHints = this.recognizePatterns(recentMessages);
+
+      const systemMessage = {
+        role: "system",
+        content: isRevulate ? 
+          `${SYSTEM_PROMPT}
+          Important: You are talking directly TO Revulate, not about him.
+          Current channel: ${channel}
+          Recognized patterns: ${patternHints}
+          Focus on being obsessively devoted to Revulate while addressing him directly.
+          Remember: Use "you" when referring to Revulate, not "he" or "him".` 
+          : 
+          `${OTHER_PROMPT}
+          Current channel: ${channel}
+          Current user: ${user.username}
+          Recognized patterns: ${patternHints}
+          Focus on the direct mention but use context from recent messages.`
+      };
+
+      const messages = [
+        systemMessage,
+        ...contextMessages,
+        {
+          role: "user",
+          content: `Based on the chat history above and recognized patterns, generate a response to: "${message}"`
+        }
+      ];
+
+      logger.debug(`Sending messages to OpenAI with context: ${JSON.stringify(messages)}`);
+
+      const response = await this.openai.chat.completions.create({
+        model: GPT_MODEL,
+        messages: messages,
+        max_tokens: MAX_TOKENS,
+        temperature: 0.7,
+        presence_penalty: 0.6,
+        frequency_penalty: 0.3,
+      });
+
+      if (response?.choices[0]?.message?.content) {
+        const generatedResponse = response.choices[0].message.content.trim();
+        // For Revulate, ensure we're using direct address
+        if (isRevulate) {
+          return generatedResponse
+            .replace(/revulate's/gi, "your")
+            .replace(/revulate is/gi, "you are")
+            .replace(/revulate has/gi, "you have")
+            .replace(/revulate/gi, "you")
+            .replace(/^@you/, "@Revulate"); // Fix the mention
+        }
+        return generatedResponse.startsWith(`@${user.username}`) ? 
+          generatedResponse : 
+          `@${user.username} ${generatedResponse}`;
+      }
+
+      return `@${user.username} Sorry, I couldn't generate a proper response.`;
+    } catch (error) {
+      logger.error(`Error handling direct mention: ${error}`);
+      return `@${user.username} Sorry, I'm having trouble processing that right now!`;
+    }
+  }
+
+  // Add this helper method to recognize patterns in messages
+  recognizePatterns(messages) {
+    const patterns = {
+      numberColors: new Map(),
+      commands: new Set(),
+      ratings: new Map()
+    };
+
+    for (const msg of messages) {
+      // Number-color patterns
+      const colorMatch = msg.message.match(/(\d+)\s+(red|blue|green|yellow|orange|purple|pink|brown|black|white)/i);
+      if (colorMatch) {
+        patterns.numberColors.set(colorMatch[1], colorMatch[2]);
+      }
+
+      // Command patterns
+      if (msg.message.startsWith('#')) {
+        patterns.commands.add(msg.message.split(' ')[0]);
+      }
+
+      // Rating patterns
+      const ratingMatch = msg.message.match(/would give @(\w+) a (\d+)\/10/);
+      if (ratingMatch) {
+        patterns.ratings.set(ratingMatch[1], ratingMatch[2]);
+      }
+    }
+
+    return JSON.stringify(patterns);
   }
 
   getWeightedConversationHistory(channel) {
@@ -822,64 +933,61 @@ class GptHandler {
     this.conversationCache.set(channel, history);
   }
 
-  async generateMentionResponse(channel, analysis) {
+  async generateMentionResponse(channel, user, message) {
     try {
-      const recentMessages = await this.getRecentMessages(channel, 5);
-      const mentionMessage = recentMessages.reverse().find(msg => 
-        msg.message.toLowerCase().includes('@tatsluna') || 
-        msg.message.toLowerCase().includes('tatsluna')
-      );
+      const recentMessages = await this.getRecentMessages(channel, 10);
+      logger.debug(`Recent messages for mention in ${channel}: ${JSON.stringify(recentMessages)}`);
 
-      if (!mentionMessage) {
-        logger.warn(`No mention found in recent messages for ${channel}`);
-        return null;
+      // Safely access user properties
+      const mentionedUserName = user?.displayName || user?.name || 'Unknown User';
+      const isRevulate = (user?.username || '').toLowerCase() === 'revulate';
+      const systemMessage = { 
+        role: "system", 
+        content: isRevulate ? SYSTEM_PROMPT : GENERAL_CHAT_PROMPT 
+      };
+      
+      // Check for URLs first
+      const urlMatch = message.match(/(https?:\/\/)?(?:www\.)?(i\.)?(?:nuuls\.com|kappa\.lol|twitch\.tv|youtube\.com|youtu\.be|[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\/\S+/gi);
+      if (urlMatch) {
+        const urlContent = await this.analyzeContentInMessage(message);
+        if (urlContent) {
+          const response = await this.generateReasonedResponse(message, {
+            channel,
+            user: mentionedUserName,
+            context: recentMessages,
+            urlAnalysis: urlContent
+          });
+          return `@${mentionedUserName} ${response}`;
+        }
       }
+      
+      const userMessages = recentMessages
+        .filter(msg => (msg.user?.name || '').toLowerCase() !== 'tatsluna')
+        .map(msg => ({
+          role: "user",
+          content: `${msg.user?.displayName || msg.user?.name}: ${msg.message}`
+        }));
 
-      const channelHistory = this.getChannelHistory(channel);
+      const messages = [
+        systemMessage,
+        ...userMessages,
+        { role: "user", content: `Generate a natural, chat-like response to: "${message}"` }
+      ];
 
-      // Add mention to history
-      channelHistory.push({ role: 'user', content: mentionMessage.message });
-
-      let contentAnalysis = analysis || await this.analyzeContentInMessage(mentionMessage.message);
-
-      const uniqueMessages = Array.from(new Set(recentMessages.map(msg => msg.message)))
-        .slice(-5)
-        .map(message => recentMessages.find(msg => msg.message === message));
-
-      const context = uniqueMessages
-        .map(msg => `${msg.username}: ${msg.message}${msg === mentionMessage ? " (This is the message I'm replying to)" : ""}`)
-        .join('\n');
-
-      const prompt = `You're Luna, a witty and sarcastic Twitch chat bot born after 2000. You're responding to a mention in a Twitch chat. Keep it casual, use emotes, and throw in some internet slang. Here's what's going on:
-
-Recent chat context:
-${context}
-
-${contentAnalysis ? `Content analysis:\n${contentAnalysis}\n` : ''}
-Now, hit 'em with your response, Luna. Focus on answering the mention, incorporating the content analysis if available. Be witty, casual, and use Twitch emotes:`;
-
-      const response = await this.openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-          ...channelHistory,
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 150,
-        temperature: 0.8,
-        n: 1,
-        stop: ["\n", "Human:", "AI:"],
-      });
-
-      const generatedResponse = response.choices[0].message.content.trim();
-
-      // Add bot's response to history
-      channelHistory.push({ role: 'assistant', content: generatedResponse });
-      this.updateChannelHistory(channel, channelHistory);
-
-      return generatedResponse;
+      const response = await this.getChatGptResponseWithHistory(messages);
+      if (response) {
+        // Clean up the response - remove any extra formatting
+        const cleanedResponse = response
+          .replace(/^Luna:\s*/i, '')  // Remove "Luna:" prefix
+          .replace(new RegExp(`@${mentionedUserName}\\s+@${mentionedUserName}`, 'gi'), `@${mentionedUserName}`); // Remove duplicate mentions
+        
+        return cleanedResponse.startsWith(`@${mentionedUserName}`) ? cleanedResponse : `@${mentionedUserName} ${cleanedResponse}`;
+      }
+      
+      return `@${mentionedUserName} Sorry, I couldn't generate a proper response.`;
     } catch (error) {
-      logger.error(`Error generating mention response: ${error.message}`);
-      return "Yikes, my brain just glitched. Can you try that again? 😅";
+      logger.error(`Error generating mention response for ${channel}: ${error.message}`);
+      return `@${user?.name || 'Unknown User'} Oops, something went wrong while processing your message.`;
     }
   }
 
@@ -940,7 +1048,7 @@ Now, hit 'em with your response, Luna. Focus on answering the mention, incorpora
       const seed = Math.floor(Math.random() * 1000000);
       const response = await this.retryWithExponentialBackoff(() => 
         this.openai.chat.completions.create({
-          model: "gpt-4o",
+          model: GPT_MODEL,
           messages: messages,
           max_tokens: maxTokens,
           temperature: temperature,
@@ -968,7 +1076,7 @@ Now, hit 'em with your response, Luna. Focus on answering the mention, incorpora
   }
 
   async analyzeContentInMessage(message) {
-    const urlRegex = /(https?:\/\/)?(?:www\.)?(i\.)?(?:nuuls\.com|twitch\.tv|youtube\.com|youtu\.be|[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\/\S+/gi;
+    const urlRegex = /(https?:\/\/)?(?:www\.)?(i\.)?(?:nuuls\.com|kappa\.lol|twitch\.tv|youtube\.com|youtu\.be|[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\/\S+/gi;
     const urls = message.match(urlRegex);
 
     if (urls && urls.length > 0) {
@@ -978,6 +1086,18 @@ Now, hit 'em with your response, Luna. Focus on answering the mention, incorpora
 
       logger.debug(`Analyzing URL: ${fullUrl}`);
 
+      // Special handling for kappa.lol links
+      if (fullUrl.includes('kappa.lol')) {
+        try {
+          const response = await fetch(fullUrl, { method: 'HEAD' });
+          const finalUrl = response.url; // Get the redirected URL
+          return await this.analyzeImage(finalUrl, questionWithoutUrl);
+        } catch (error) {
+          logger.error(`Error processing kappa.lol link: ${error.message}`);
+          return "Sorry, I couldn't access that kappa.lol link.";
+        }
+      }
+
       if (fullUrl.includes('twitch.tv')) {
         return await this.analyzeTwitchStream(fullUrl, questionWithoutUrl);
       } else if (fullUrl.match(/\.(jpg|jpeg|png|gif|webp)$/i)) {
@@ -985,16 +1105,22 @@ Now, hit 'em with your response, Luna. Focus on answering the mention, incorpora
       } else if (fullUrl.includes('youtube.com') || fullUrl.includes('youtu.be')) {
         return await this.analyzeVideo(fullUrl, questionWithoutUrl);
       } else {
-        return await this.analyzeImage(fullUrl, questionWithoutUrl);
+        // Try to analyze as image first, fall back to other methods if it fails
+        try {
+          return await this.analyzeImage(fullUrl, questionWithoutUrl);
+        } catch (error) {
+          logger.error(`Failed to analyze as image: ${error.message}`);
+          return 'Unable to analyze the content of this URL.';
+        }
       }
     }
 
-    return 'No content to analyze. The message does not contain any recognizable URLs or media content.';
+    return null;
   }
 
   async summarizeConversation(messages) {
     const summary = await this.openai.chat.completions.create({
-      model: "gpt-4o",
+      model: GPT_MODEL,
       messages: [
         { role: "system", content: "Summarize the following conversation concisely:" },
         ...messages
@@ -1044,21 +1170,28 @@ Now, hit 'em with your response, Luna. Focus on answering the mention, incorpora
   async getRecentMessages(channel, count) {
     logger.debug(`Fetching ${count} recent messages for channel: ${channel}`);
     try {
-      const messages = MessageLogger.getRecentMessages(channel.replace('#', ''), count);
+      const messages = await this.twitchAPI.getRecentChannelMessages(channel, count);
       
-      if (messages.length === 0) {
+      if (!messages || messages.length === 0) {
         logger.warn(`No recent messages found for channel: ${channel}`);
         return [];
       }
 
-      // Filter out bot's own messages
-      const filteredMessages = messages.filter(msg => msg.username.toLowerCase() !== 'tatsluna');
+      // Filter out bot's own messages and format consistently
+      const filteredMessages = messages
+        .filter(msg => msg.user.name.toLowerCase() !== 'tatsluna')
+        .map(msg => ({
+          user: {
+            name: msg.user.name,
+            displayName: msg.user.displayName || msg.user.name
+          },
+          message: msg.message,
+          timestamp: typeof msg.timestamp === 'string' ? 
+            new Date(msg.timestamp).getTime() : msg.timestamp
+        }));
 
       logger.info(`Retrieved ${filteredMessages.length} recent messages for channel: ${channel}`);
-      return filteredMessages.map(msg => ({
-        username: msg.username,
-        message: msg.message
-      }));
+      return filteredMessages;
     } catch (error) {
       logger.error(`Error fetching recent messages for channel ${channel}: ${error.message}`);
       return [];
@@ -1088,55 +1221,34 @@ Now, hit 'em with your response, Luna. Focus on answering the mention, incorpora
   }
 
   shouldRespondToRecentMessages(channel, messages) {
-    const botMentions = ['@tatsluna', 'tatsluna'];
-    const lastMessage = messages[messages.length - 1];
-    const hasMention = botMentions.some(mention => lastMessage.message.toLowerCase().includes(mention));
-
-    // Generate a unique ID for the last message
-    const lastMessageId = this.hashString(`${lastMessage.username}-${lastMessage.message}`);
-
-    // Check if we've already responded to this message
-    if (this.lastRespondedMessageIds.get(channel) === lastMessageId) {
-        logger.debug(`Already responded to message ${lastMessageId} in channel ${channel}`);
-        return false;
+    if (messages.length === 0) {
+      return false;
     }
 
-    // Always respond to direct mentions in any channel, regardless of cooldown
-    if (hasMention) {
-        this.lastRespondedMessageIds.set(channel, lastMessageId);
-        return true;
+    // For non-mention messages, only proceed for the autonomy channel
+    if (channel.toLowerCase() !== this.autonomyChannel.toLowerCase()) {
+      return false;
     }
 
     const currentTime = Date.now();
     const lastResponseTime = this.lastResponseTime.get(channel) || 0;
     const timeSinceLastResponse = currentTime - lastResponseTime;
 
-    // Autonomous behavior only for the designated autonomy channel
-    if (channel.toLowerCase() === this.autonomyChannel.toLowerCase()) {
-        // Check if enough time has passed since the last response
-        if (timeSinceLastResponse < this.cooldownPeriod) {
-            return false;
-        }
-
-        const randomChance = Math.random() < 0.01; // 1% chance to respond randomly
-        
-        // Check for context-specific keywords that might warrant a response
-        const contextKeywords = ['oatmeal', 'recipe', 'starve'];
-        const hasRelevantContext = messages.some(msg => 
-            contextKeywords.some(keyword => msg.message.toLowerCase().includes(keyword))
-        );
-
-        logger.debug(`shouldRespondToRecentMessages for ${channel}: randomChance=${randomChance}, hasRelevantContext=${hasRelevantContext}, timeSinceLastResponse=${timeSinceLastResponse}`);
-
-        // Respond if there's relevant context or random chance
-        if (hasRelevantContext || randomChance) {
-            this.lastRespondedMessageIds.set(channel, lastMessageId);
-            return true;
-        }
+    // Check if enough time has passed since the last response
+    if (timeSinceLastResponse < this.cooldownPeriod) {
+      return false;
     }
 
-    // For non-autonomy channels, don't respond unless it's a direct mention (which was handled at the beginning)
-    return false;
+    const lastMessage = messages[messages.length - 1];
+    const randomChance = Math.random() < 0.01; // 1% chance to respond randomly
+    
+    // Check for context-specific keywords that might warrant a response
+    const contextKeywords = ['oatmeal', 'recipe', 'starve'];
+    const hasRelevantContext = lastMessage.message.toLowerCase().split(' ').some(word => contextKeywords.includes(word));
+
+    logger.debug(`shouldRespondToRecentMessages for ${channel}: randomChance=${randomChance}, hasRelevantContext=${hasRelevantContext}, timeSinceLastResponse=${timeSinceLastResponse}`);
+
+    return hasRelevantContext || randomChance;
   }
 
   getChannelHistory(channel) {
@@ -1147,121 +1259,150 @@ Now, hit 'em with your response, Luna. Focus on answering the mention, incorpora
     // Keep only the last 10 messages to prevent the history from growing too large
     this.conversationHistory.set(channel, history.slice(-10));
   }
-}
 
-async function getVideoThumbnails(videoId) {
-  try {
-    const thumbnailUrls = [
-      `https://img.youtube.com/vi/${videoId}/0.jpg`,
-      `https://img.youtube.com/vi/${videoId}/1.jpg`,
-      `https://img.youtube.com/vi/${videoId}/2.jpg`,
-      `https://img.youtube.com/vi/${videoId}/3.jpg`,
+  async getCachedOrGeneratePrompt(context) {
+    const cacheKey = `prompt_${context.channel}_${context.user.id}`;
+    let prompt = this.promptCache.get(cacheKey);
+    
+    if (!prompt) {
+      prompt = await this.generatePrompt(context);
+      this.promptCache.set(cacheKey, prompt);
+    }
+    
+    return prompt;
+  }
+
+  async generatePrompt(context) {
+    // Implement prompt generation logic here
+    return `Generate a response for ${context.user.username} in the channel ${context.channel}`;
+  }
+
+  async truncateMessages(messages) {
+    let totalTokens = 0;
+    const truncatedMessages = [];
+
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      const messageTokens = this.estimateTokens(message.content);
+
+      if (totalTokens + messageTokens <= this.tokenLimit) {
+        truncatedMessages.unshift(message);
+        totalTokens += messageTokens;
+      } else {
+        break;
+      }
+    }
+
+    return truncatedMessages;
+  }
+
+  estimateTokens(text) {
+    // A simple estimation: 1 token ≈ 4 characters
+    return Math.ceil(text.length / 4);
+  }
+
+  async generateReasonedResponse(message, context) {
+    const reasoningSteps = [
+      { role: "system", content: "Let's analyze this step-by-step:" },
+      { 
+        role: "user", 
+        content: "1. Understand the context and content"
+      },
+      { 
+        role: "assistant", 
+        content: `This is a Twitch chat in ${context.channel}. User ${context.user} is asking about: "${message}"`
+      },
+      {
+        role: "user",
+        content: "2. Consider the URL content analysis"
+      },
+      {
+        role: "assistant",
+        content: `The URL contains: ${context.urlAnalysis}`
+      },
+      {
+        role: "user",
+        content: "3. Formulate a natural, chat-like response"
+      }
     ];
 
-    logger.info(`Thumbnail URLs: ${thumbnailUrls.join(', ')}`);
-    return thumbnailUrls;
-  } catch (error) {
-    logger.error(`Error fetching video thumbnails: ${error.message}`);
-    throw error;
+    const response = await this.openai.chat.completions.create({
+      model: GPT_MODEL,
+      messages: reasoningSteps,
+      max_tokens: MAX_TOKENS,
+      temperature: 0.7, // Slightly lower temperature for more focused responses
+    });
+
+    return response.choices[0].message.content.trim();
+  }
+
+  async generateGeneralChatResponse(channel, recentMessages) {
+    try {
+      const systemMessage = { role: "system", content: GENERAL_CHAT_PROMPT };
+      
+      const userMessages = recentMessages
+        .filter(msg => msg.user.name.toLowerCase() !== 'tatsluna')
+        .map(msg => ({
+          role: "user",
+          content: `${msg.user.displayName || msg.user.name}: ${msg.message}`
+        }));
+
+      const messages = [
+        systemMessage,
+        ...userMessages,
+        { role: "user", content: "Generate a response based on the recent chat context." }
+      ];
+
+      logger.debug(`Sending messages to OpenAI for general chat response: ${JSON.stringify(messages)}`);
+
+      const response = await this.getChatGptResponseWithHistory(messages);
+      return response || "I'm not sure what to say right now.";
+    } catch (error) {
+      logger.error(`Error generating general chat response for ${channel}: ${error.message}`);
+      return "Oops, I'm having trouble coming up with a response right now.";
+    }
+  }
+
+  addToCache(userId, prompt, response) {
+    const cacheKey = `gpt_${userId}_${prompt}`;
+    this.responseCache.set(cacheKey, response);
   }
 }
 
-function extractVideoId(url) {
-  const regExp = /^.*((youtu.be\/)|(v\/)|(\/u\/\w\/)|(embed\/)|(watch\?))\??v?=?([^#&?]*).*/;
-  const match = url.match(regExp);
-  return (match && match[7].length === 11) ? match[7] : false;
+// Replace the getYoutubeClient function with this simpler version
+function getYoutubeClient() {
+  return google.youtube({
+    version: 'v3',
+    auth: config.youtube.apiKey // Just use the API key directly
+  });
 }
 
 async function getVideoInfo(videoId) {
   try {
-    const response = await youtube.videos.list({
-      part: 'snippet',
-      id: videoId,
-      key: config.youtube.apiKey
+    const youtube = google.youtube({
+      version: 'v3',
+      auth: config.youtube.apiKey
     });
 
-    if (response.data.items.length === 0) {
-      throw new Error('No video found with the given ID');
+    const response = await youtube.videos.list({
+      part: ['snippet', 'contentDetails', 'statistics'],
+      id: videoId
+    });
+
+    if (!response.data.items.length) {
+      throw new Error('No video found');
     }
 
-    const videoInfo = response.data.items[0].snippet;
-    return {
-      title: videoInfo.title,
-      description: videoInfo.description
-    };
+    return response.data.items[0];
   } catch (error) {
     logger.error(`Error fetching video info: ${error.message}`);
     throw error;
   }
 }
 
-async function getVideoDuration(videoId) {
-  try {
-    const response = await youtube.videos.list({
-      part: 'contentDetails',
-      id: videoId,
-      key: config.youtube.apiKey
-    });
-
-    if (response.data.items.length === 0) {
-      throw new Error('No video found with the given ID');
-    }
-
-    const duration = response.data.items[0].contentDetails.duration;
-    return parseDuration(duration);
-  } catch (error) {
-    logger.error(`Error fetching video duration: ${error.message}`);
-    throw error;
-  }
-}
-
-function parseDuration(duration) {
-  const match = duration.match(/PT(\d+H)?(\d+M)?(\d+S)?/);
-  const hours = (parseInt(match[1]) || 0);
-  const minutes = (parseInt(match[2]) || 0);
-  const seconds = (parseInt(match[3]) || 0);
-  return hours * 3600 + minutes * 60 + seconds;
-}
-
+// Remove the transcript functionality since it requires OAuth
 async function getVideoTranscript(videoId) {
-  try {
-    const response = await youtube.captions.list({
-      part: 'snippet',
-      videoId: videoId
-    });
-    
-    if (response.data.items && response.data.items.length > 0) {
-      const captionTrack = response.data.items[0];
-      const captionResponse = await fetch(`https://www.googleapis.com/youtube/v3/captions/${captionTrack.id}`, {
-        headers: {
-          'Authorization': `Bearer ${config.youtube.accessToken}`,
-          'Accept': 'application/json'
-        }
-      });
-      const captionData = await captionResponse.json();
-      return captionData.text;
-    } else {
-      return "No transcript available.";
-    }
-  } catch (error) {
-    logger.error('Error fetching transcript:', error);
-    return "Unable to fetch transcript.";
-  }
-}
-
-// Add this function to convert relative URLs to absolute URLs
-function ensureAbsoluteUrl(url) {
-  if (url.startsWith('//')) {
-    return `https:${url}`;
-  } else if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    // Check if the URL starts with a subdomain
-    if (url.includes('.')) {
-      return `https://${url}`;
-    } else {
-      return `https://www.${url}`;
-    }
-  }
-  return url;
+  return "Transcript unavailable"; // Simplified version
 }
 
 export function setupGpt(bot, twitchAPI) {
@@ -1282,3 +1423,4 @@ export function setupGpt(bot, twitchAPI) {
     tryGenerateAndSendMessage: (channel) => gptHandler.tryGenerateAndSendMessage(channel)
   };
 }
+

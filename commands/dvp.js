@@ -13,13 +13,14 @@ import NodeCache from 'node-cache';
 import JSONStream from 'jsonstream/index.js';
 import { pipeline } from 'stream/promises';
 import { config } from '../config.js';
+import path from 'path';
 
 dotenv.config();
 
 class DVP {
   constructor(bot) {
     this.bot = bot;
-    this.dbPath = 'vulpes_games.db';
+    this.dbPath = path.join(process.cwd(), 'databases', 'vulpes_games.db');
     this.channelName = 'vulpeshd';
     this.sheetId = process.env.GOOGLE_SHEET_ID;
     this.credsFile = process.env.GOOGLE_CREDENTIALS_FILE;

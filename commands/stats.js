@@ -2,11 +2,13 @@ import os from 'os';
 import fs from 'fs/promises';
 import path from 'path';
 import logger from '../logger.js';
+import TwitchAPI from '../twitch_api.js';
 
 class Stats {
   constructor(bot) {
     this.bot = bot;
     this.startTime = Date.now();
+    this.twitchAPI = new TwitchAPI();
   }
 
   async getDirectorySize(directory) {
@@ -70,7 +72,7 @@ class Stats {
     const start = Date.now();
     try {
       // Use the Twitch API client directly
-      await this.bot.api.users.getUserByName('twitch');
+      await this.twitchAPI.apiClient.users.getUserByName('twitch');
       return Date.now() - start;
     } catch (error) {
       logger.error(`Error in getPing: ${error}`);

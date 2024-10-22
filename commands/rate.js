@@ -185,21 +185,59 @@ class Rate {
   }
 }
 
+// Add these aliases back for myd command
+const mydAliases = ['myd', 'pp', 'kok', 'cock', 'dick'];
+
+// Fix the all command to properly check if values exist
+function handleAll(context) {
+  try {
+    const username = context.user.username;
+    const responses = [];
+
+    // Get all the rate values
+    const cuteValue = getRateValue(username, 'cute');
+    const gayValue = getRateValue(username, 'gay');
+    const straightValue = getRateValue(username, 'straight');
+    const mydValue = getMydValue(username);
+    const hornyValue = getRateValue(username, 'horny');
+    const iqValue = getIqValue(username);
+    const susValue = getRateValue(username, 'sus');
+
+    // Build response array with proper checks
+    if (cuteValue !== undefined) responses.push(`${cuteValue}% cute`);
+    if (gayValue !== undefined) responses.push(`${gayValue}% gay`);
+    if (straightValue !== undefined) responses.push(`${straightValue}% straight`);
+    if (mydValue) responses.push(`${mydValue.length}cm x ${mydValue.girth}cm pp`);
+    if (hornyValue !== undefined) responses.push(`${hornyValue}% horny`);
+    if (iqValue !== undefined) responses.push(`${iqValue} IQ`);
+    if (susValue !== undefined) responses.push(`${susValue}% sus`);
+
+    // Join all responses with commas
+    const response = `@${username} is ${responses.join(', ')}`;
+    return response;
+  } catch (error) {
+    logger.error('Error in all command:', error);
+    return `@${context.user.username}, Sorry, an error occurred while getting your stats.`;
+  }
+}
+
+// Export the Rate class and setup function
 export function setupRate(bot) {
-  const rate = new Rate(bot);
+  const rateHandler = new Rate(bot);
+  
   return {
-    cute: (context) => rate.handleCuteCommand(context),
-    gay: (context) => rate.handleGayCommand(context),
-    straight: (context) => rate.handleStraightCommand(context),
-    myd: (context) => rate.handleMydCommand(context),
-    pp: (context) => rate.handleMydCommand(context),
-    kok: (context) => rate.handleMydCommand(context),
-    cock: (context) => rate.handleMydCommand(context),
-    penis: (context) => rate.handleMydCommand(context),
-    rate: (context) => rate.handleRateCommand(context),
-    horny: (context) => rate.handleHornyCommand(context),
-    iq: (context) => rate.handleIqCommand(context),
-    sus: (context) => rate.handleSusCommand(context),
-    all: (context) => rate.handleAllCommand(context),
+    cute: (context) => rateHandler.handleCuteCommand(context),
+    gay: (context) => rateHandler.handleGayCommand(context),
+    straight: (context) => rateHandler.handleStraightCommand(context),
+    // Add all myd aliases
+    ...Object.fromEntries(mydAliases.map(alias => [
+      alias, 
+      (context) => rateHandler.handleMydCommand(context)
+    ])),
+    rate: (context) => rateHandler.handleRateCommand(context),
+    horny: (context) => rateHandler.handleHornyCommand(context),
+    iq: (context) => rateHandler.handleIqCommand(context),
+    sus: (context) => rateHandler.handleSusCommand(context),
+    all: (context) => rateHandler.handleAllCommand(context)
   };
 }

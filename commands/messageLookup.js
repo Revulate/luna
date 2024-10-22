@@ -16,29 +16,37 @@ class MessageLookup {
       isSelfLookup = targetUser.toLowerCase() === user.username.toLowerCase();
     }
 
-    let lastMessage;
-    if (isSelfLookup) {
-      const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
-      lastMessage = MessageLogger.getUserLastMessageBefore(channelName, user.username, fiveMinutesAgo);
-    } else {
-      lastMessage = MessageLogger.getUserLastMessage(channelName, targetUser);
-    }
-
-    if (lastMessage) {
-      const date = new Date(lastMessage.timestamp);
-      const formattedDate = this.formatDate(date);
-      let response;
-      if (isSelfLookup) {
-        response = `@${user.username}, this was your last message before 5 minutes ago • ${lastMessage.message} • (${formattedDate})`;
+    try {
+      const messagesWithContext = await MessageLogger.getMessagesWithContext(channelName, targetUser);
+      
+      if (messagesWithContext && messagesWithContext.length > 0) {
+        const lastMessage = messagesWithContext[0];
+        const date = new Date(lastMessage.timestamp);
+        const formattedDate = this.formatDate(date);
+        
+        let response;
+        if (isSelfLookup) {
+          response = `@${user.username}, this was your last message • ${lastMessage.message} • (${formattedDate})`;
+          if (lastMessage.previous_message) {
+            response += ` • Context: "${lastMessage.previous_message}" ➜ "${lastMessage.message}"`;
+          }
+        } else {
+          response = `@${user.username}, ${targetUser}'s last message was: ${lastMessage.message} • (${formattedDate})`;
+          if (lastMessage.previous_message) {
+            response += ` • Context: "${lastMessage.previous_message}" ➜ "${lastMessage.message}"`;
+          }
+        }
+        
+        await this.bot.say(channel, response);
       } else {
-        response = `@${user.username}, ${targetUser}'s last message was: ${lastMessage.message} • (${formattedDate})`;
+        const response = isSelfLookup
+          ? `@${user.username}, I couldn't find any messages from you in this channel.`
+          : `@${user.username}, I couldn't find any messages from ${targetUser} in this channel.`;
+        await this.bot.say(channel, response);
       }
-      await this.bot.say(channel, response);
-    } else {
-      const response = isSelfLookup
-        ? `@${user.username}, I couldn't find any messages from you older than 5 minutes in this channel.`
-        : `@${user.username}, I couldn't find any messages from ${targetUser} in this channel.`;
-      await this.bot.say(channel, response);
+    } catch (error) {
+      logger.error(`Error in handleLastMessageCommand: ${error}`);
+      await this.bot.say(channel, `@${user.username}, Sorry, an error occurred while retrieving messages.`);
     }
   }
 
@@ -88,30 +96,21 @@ class MessageLookup {
   }
 
   async handleCommand(context) {
-    const { channel, user, message } = context;
+    const { channel, user, message, args } = context;
     
-    // Extract the actual message content
-    let messageContent;
-    if (typeof message === 'object' && message._parsedParams && message._parsedParams.text) {
-      messageContent = message._parsedParams.text.value;
-    } else if (typeof message === 'string') {
-      messageContent = message;
-    } else {
-      logger.error(`Invalid message format: ${JSON.stringify(message)}`);
-      return;
-    }
+    // Get the command from the first argument
+    const command = args[0].toLowerCase();
+    // Get the remaining args
+    const commandArgs = args.slice(1);
 
-    // Extract command and args
-    const [command, ...args] = messageContent.split(' ');
-
-    switch (command.toLowerCase()) {
+    switch (command) {
       case '#lastmessage':
       case '#lm':
-        await this.handleLastMessageCommand({ channel, user, args });
+        await this.handleLastMessageCommand({ channel, user, args: commandArgs });
         break;
       case '#randommessage':
       case '#rm':
-        if (args.length > 0) {
+        if (commandArgs.length > 0) {
           await this.bot.say(channel, `@${user.username} sorry, but to respect their privacy I won't do that.`);
         } else {
           await this.handleRandomMessageCommand({ channel, user });
@@ -119,7 +118,7 @@ class MessageLookup {
         break;
       case '#wordcount':
       case '#wc':
-        await this.handleWordCountCommand({ channel, user, args });
+        await this.handleWordCountCommand({ channel, user, args: commandArgs });
         break;
       default:
         logger.warn(`Unknown command: ${command}`);
@@ -128,13 +127,59 @@ class MessageLookup {
 }
 
 export function setupMessageLookup(bot) {
-  const messageLookup = new MessageLookup(bot);
   return {
-    rm: (context) => messageLookup.handleCommand(context),
-    randommessage: (context) => messageLookup.handleCommand(context),
-    lm: (context) => messageLookup.handleCommand(context),
-    lastmessage: (context) => messageLookup.handleCommand(context),
-    wc: (context) => messageLookup.handleCommand(context),
-    wordcount: (context) => messageLookup.handleCommand(context)
+    lm: async (context) => {
+      try {
+        const messages = await MessageLogger.getRecentMessages(context.channel.replace('#', ''), 100);
+        if (!messages || messages.length === 0) {
+          await context.bot.say(context.channel, `@${context.user.username}, No messages found.`);
+          return;
+        }
+
+        const userMessages = messages.filter(msg => 
+          msg.username.toLowerCase() === context.user.username.toLowerCase()
+        );
+
+        if (userMessages.length > 1) {
+          const lastMessage = userMessages[1];
+          await context.bot.say(context.channel, 
+            `@${context.user.username} Your last message was: ${lastMessage.message}`
+          );
+        } else {
+          await context.bot.say(context.channel, 
+            `@${context.user.username} No previous messages found.`);
+        }
+      } catch (error) {
+        logger.error(`Error in lm command: ${error}`);
+        await context.bot.say(context.channel, 
+          `@${context.user.username}, Sorry, an error occurred.`);
+      }
+    },
+    rm: async (context) => {
+      try {
+        const messages = await MessageLogger.getRecentMessages(context.channel.replace('#', ''), 100);
+        if (!messages || messages.length === 0) {
+          await context.bot.say(context.channel, `@${context.user.username}, No messages found.`);
+          return;
+        }
+
+        // Get random message excluding the current command
+        const filteredMessages = messages.filter(msg => 
+          msg.username.toLowerCase() !== context.user.username.toLowerCase() &&
+          !msg.message.startsWith('#')
+        );
+        
+        if (filteredMessages.length === 0) {
+          await context.bot.say(context.channel, `@${context.user.username}, No valid messages found.`);
+          return;
+        }
+
+        const randomMessage = filteredMessages[Math.floor(Math.random() * filteredMessages.length)];
+        await context.bot.say(context.channel, `@${context.user.username} Random message from ${randomMessage.username}: ${randomMessage.message}`);
+      } catch (error) {
+        logger.error(`Error in rm command: ${error}`);
+        await context.bot.say(context.channel, `@${context.user.username}, Sorry, an error occurred while processing your request.`);
+      }
+    }
   };
 }

@@ -42,19 +42,14 @@ async function initializeTokensFile() {
         accessToken: '',
         refreshToken: '',
         expiresIn: 0,
-        obtainmentTimestamp: 0,
-        scope: []
+        obtainmentTimestamp: 0
       };
       await fs.writeFile(tokensPath, JSON.stringify(defaultTokens, null, 2));
-    } else {
-      throw error;
     }
   }
 }
 
-// Add this line near the top of the file
-let lastCommandTime = 0;
-const commandCooldown = 5000; // 5 seconds cooldown after a command
+let globalBot = null; // Add this to store bot reference globally
 
 async function main() {
   try {
@@ -77,12 +72,9 @@ async function main() {
       tokenData
     );
 
-    // Add the chat intent to the auth provider
     await authProvider.addUserForToken(tokenData, ['chat']);
 
     const apiClient = new ApiClient({ authProvider });
-    const twitchAPI = new TwitchAPI(apiClient);
-
     const chatClient = new ChatClient({
       authProvider,
       channels: config.twitch.channels,
@@ -90,98 +82,106 @@ async function main() {
       requestMembershipEvents: true
     });
 
+    const twitchAPI = new TwitchAPI(apiClient);
+
+    // Initialize bot object with all required methods
     const bot = {
       say: async (channel, message) => {
-        const channelName = channel.replace('#', '');
-        await botStatusManager.customRateLimit(channelName);
         await chatClient.say(channel, message);
         logger.debug(`Message sent to ${channel}: ${message}`);
       },
       api: apiClient,
-      commands: {}, // Store commands
+      twitchAPI,
+      chatClient,
+      commands: {},
       addCommand: function(name, handler) {
-        this.commands[name] = async (context) => {
-          await handler(context);
-          lastCommandTime = Date.now(); // Set the last command time
-        };
+        this.commands[name] = handler;
       },
-      // Add this new method
       getChannels: function() {
         return config.twitch.channels;
-      },
-      getLastCommandTime: function() {
-        return lastCommandTime;
-      },
+      }
     };
 
-    // Setup commands
-    const { handleAfkMessage } = await setupCommands(bot, twitchAPI);
-    bot.handleAfkMessage = handleAfkMessage;
+    globalBot = bot; // Store bot reference globally
 
-    const gptCommands = setupGpt(bot, twitchAPI);
-    
-    // Add the gpt command to the bot's commands
-    bot.addCommand('gpt', gptCommands.gpt);
-
-    chatClient.onConnect(() => {
-      logger.info('Bot connected to Twitch chat');
-    });
-
-    chatClient.onJoin((channel, user) => {
-      if (user === chatClient.currentNick) {
-        logger.info(`Joined channel: ${channel}`);
-        // Request USERSTATE when joining a channel
-        chatClient.say(channel, '').then(() => {
-          const badges = chatClient.userStateTracker.getForChannel(channel).badges;
-          botStatusManager.updateStatus(channel, Object.keys(badges));
-        }).catch(error => {
-          logger.error(`Error requesting USERSTATE in ${channel}: ${error.message}`);
-        });
-      }
-    });
-
+    // Add message handling
     chatClient.onMessage(async (channel, user, message, msg) => {
-      // Use a Map for faster lookups
-      const badgeSet = new Set(msg.userInfo.badges ? msg.userInfo.badges.keys() : []);
-      botStatusManager.updateStatus(channel, badgeSet);
-
-      const formattedChannel = channel.startsWith('#') ? channel : `#${channel}`;
-      logger.info(`[MESSAGE] ${formattedChannel} @${user}: ${message}`);
-
       try {
-        const userInfo = await twitchAPI.getUserInfo(channel, msg.userInfo);
+        // Update bot status based on badges
+        botStatusManager.updateStatus(channel, msg.userInfo.badges);
 
         // Log the message
-        MessageLogger.logMessage(channel.replace('#', ''), msg.userInfo.userId, user, message);
+        await MessageLogger.logMessage(channel, user, message, msg);
 
+        // Handle commands if message starts with prefix
         if (message.startsWith('#')) {
           const [command, ...args] = message.slice(1).split(' ');
           const handler = bot.commands[command];
           if (handler) {
-            await handler({ channel, user: userInfo, message: msg, args, bot });
+            const context = {
+              channel,
+              user: {
+                id: msg.userInfo.userId,
+                username: user,
+                isMod: msg.userInfo.isMod,
+                isBroadcaster: msg.userInfo.isBroadcaster,
+                isVip: msg.userInfo.isVip,
+                badges: msg.userInfo.badges
+              },
+              args,
+              message: message.slice(command.length + 2), // +2 for # and space
+              rawMessage: msg
+            };
+            await handler(context);
           }
         } else {
-          await bot.handleAfkMessage(channel, userInfo, message);
+          // Handle AFK status for non-command messages
+          if (afkModule && afkModule.messageHandler) {
+            await afkModule.messageHandler(channel, {
+              id: msg.userInfo.userId,
+              username: user,
+              badges: msg.userInfo.badges
+            }, message);
+          }
         }
-
-        // Trigger the autonomous chat check
-        await gptCommands.tryGenerateAndSendMessage(channel);
       } catch (error) {
-        logger.error(`Error processing message: ${error.message}`);
+        logger.error(`Error handling message: ${error}`);
       }
     });
 
-    // Add this new event handler to check for errors
-    chatClient.onAuthenticationFailure((text, retryCount) => {
-      logger.error(`Authentication failed: ${text} (retry count: ${retryCount})`);
-      if (retryCount >= 5) {
-        logger.error('Max retry count reached. Shutting down.');
-        gracefulShutdown();
-      }
-    });
+    // Setup base commands first
+    const { handleAfkMessage, commands } = await setupCommands(bot, twitchAPI);
+    bot.handleAfkMessage = handleAfkMessage;
+    Object.assign(bot.commands, commands);  // Assign base commands
+
+    // Set up AFK module and add its commands
+    const afkModule = await setupAfk(bot);
+    
+    // Add AFK commands to existing commands
+    bot.commands.afk = afkModule.afk;
+    bot.commands.sleep = afkModule.sleep;
+    bot.commands.gn = afkModule.gn;
+    bot.commands.work = afkModule.work;
+    bot.commands.food = afkModule.food;
+    bot.commands.gaming = afkModule.gaming;
+    bot.commands.bed = afkModule.bed;
+    bot.commands.rafk = afkModule.rafk;
+    bot.commands.clearafk = afkModule.clearafk;
 
     await chatClient.connect();
     logger.info(`Bot started successfully and joined channels: ${config.twitch.channels.join(', ')}`);
+
+    // Set up autonomous chat interval using the global bot reference
+    setInterval(() => {
+      if (globalBot) {
+        globalBot.getChannels().forEach(channel => {
+          if (globalBot.commands.tryGenerateAndSendMessage) {
+            globalBot.commands.tryGenerateAndSendMessage(channel);
+          }
+        });
+      }
+    }, 5 * 60 * 1000); // Every 5 minutes
+
   } catch (error) {
     logger.error(`Critical error in main function: ${error}`);
     await gracefulShutdown();

@@ -52,3 +52,16 @@ Contributions are welcome! Please open an issue or submit a pull request.
 
 **License**
 This project is licensed under the MIT License.
+
+## Project Structure
+
+- `/databases`: Contains all SQLite database files
+- `/logs`: 
+  - `/winston`: Contains Winston log files
+  - `/messages`: Contains message log databases for each channel
+- `/commands`: Individual command modules
+- `/services`: Various service modules
+- `index.js`: Main entry point of the application
+- `config.js`: Configuration file
+- `logger.js`: Logging setup
+- `MessageLogger.js`: Message logging functionality

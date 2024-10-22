@@ -5,13 +5,14 @@ import logger from '../logger.js';
 import { setTimeout as setTimeoutPromise } from 'timers/promises';
 import jsonStream from 'jsonstream/index.js';
 import { pipeline } from 'stream/promises';
+import path from 'path';
 
 class Spc {
   constructor(bot) {
     this.bot = bot;
     this.logger = logger;
     this.steamApiKey = config.steam.apiKey;
-    this.dbPath = 'steam_game.db';
+    this.dbPath = path.join(process.cwd(), 'databases', 'steam_game.db');
     this.isDataFetching = false;
     this.gameCache = new Map();
     this.playerCountCache = new Map();

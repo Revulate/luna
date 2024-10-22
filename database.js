@@ -1,11 +1,22 @@
 import Database from 'better-sqlite3';
 import { config } from './config.js';
 import logger from './logger.js';
+import path from 'path';
+import fs from 'fs';
+
+function ensureDatabaseDirectory() {
+  const dbDir = path.join(process.cwd(), 'databases');
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
+  return dbDir;
+}
 
 class DatabasePool {
   constructor(maxConnections = 5) {
     this.pool = [];
     this.maxConnections = maxConnections;
+    this.dbDir = ensureDatabaseDirectory();
   }
 
   getConnection() {
@@ -13,7 +24,8 @@ class DatabasePool {
       return this.pool.pop();
     }
     if (this.pool.length + 1 <= this.maxConnections) {
-      const db = new Database(config.database.path, { verbose: logger.debug });
+      const dbPath = path.join(this.dbDir, config.database.filename);
+      const db = new Database(dbPath, { verbose: logger.debug });
       db.pragma('journal_mode = WAL');
       return db;
     }
@@ -31,7 +43,9 @@ let db; // Define db variable
 
 export async function initializeDatabase() {
   try {
-    db = new Database(config.database.path, { verbose: logger.debug });
+    const dbDir = ensureDatabaseDirectory();
+    const dbPath = path.join(dbDir, config.database.filename);
+    db = new Database(dbPath, { verbose: logger.debug });
 
     // Enable WAL mode for better concurrency
     db.pragma('journal_mode = WAL');
@@ -48,6 +62,11 @@ export async function initializeDatabase() {
       CREATE TABLE IF NOT EXISTS steam_games (
         appid INTEGER PRIMARY KEY,
         name TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS user_histories (
+        user_id TEXT PRIMARY KEY,
+        history TEXT NOT NULL
       );
     `);
 
@@ -107,4 +126,12 @@ export function allQuery(query, params = []) {
   } finally {
     dbPool.releaseConnection(connection);
   }
+}
+
+export function getUserHistory(userId) {
+  return getQuery('SELECT history FROM user_histories WHERE user_id = ?', [userId]);
+}
+
+export function updateUserHistory(userId, history) {
+  return runQuery('INSERT OR REPLACE INTO user_histories (user_id, history) VALUES (?, ?)', [userId, JSON.stringify(history)]);
 }

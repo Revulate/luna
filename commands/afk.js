@@ -1,154 +1,321 @@
-import Database from 'better-sqlite3';
+import { runQuery, getQuery, allQuery } from '../database.js';
 import logger from '../logger.js';
+import MessageLogger from '../MessageLogger.js';
 
 class AFK {
   constructor(bot) {
     this.bot = bot;
-    this.dbPath = 'bot.db';
     this.lastAfkMessageTime = new Map();
-    this.db = null;
-    this.currentlyAfkUsers = new Map(); // Changed to Map to store more info
-    this.preparedStatements = {};
-    this.afkCommands = new Set(['#afk', '#sleep', '#gn', '#work', '#food', '#gaming', '#bed', '#rafk']);
+    this.currentlyAfkUsers = new Map();
+    this.afkCommands = new Set(['afk', 'sleep', 'gn', 'work', 'food', 'gaming', 'bed', 'rafk']);
+    this.initialized = false;
+    
+    // Improved emoji mappings
+    this.reasonEmojis = {
+      afk: '🚶',
+      sleep: '😴',
+      work: '💼',
+      food: '🍽️',
+      gaming: '🎮',
+      bed: '🛏️',
+      gn: '💤'
+    };
   }
 
   async setupDatabase() {
-    const start = process.hrtime();
     try {
-      this.db = new Database(this.dbPath, { verbose: logger.debug });
+      // Wait for database to be ready
+      await new Promise(resolve => setTimeout(resolve, 1000));
 
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS afk (
-          user_id TEXT PRIMARY KEY,
+      // Create or modify the AFK table
+      await runQuery(`
+        CREATE TABLE IF NOT EXISTS afk_status (
+          user_id TEXT NOT NULL,
+          channel TEXT NOT NULL,
           username TEXT NOT NULL,
-          afk_time REAL NOT NULL,
-          reason TEXT,
-          return_time REAL,
-          active INTEGER NOT NULL DEFAULT 1
+          afk_time INTEGER NOT NULL,
+          reason TEXT NOT NULL,
+          return_time INTEGER,
+          active INTEGER NOT NULL DEFAULT 1,
+          PRIMARY KEY (user_id, channel)
         )
       `);
 
-      // Prepare statements
-      this.preparedStatements = {
-        insertAfk: this.db.prepare(`
-          INSERT OR REPLACE INTO afk (user_id, username, afk_time, reason, return_time, active)
-          VALUES (?, ?, ?, ?, NULL, 1)
-        `),
-        selectAfk: this.db.prepare("SELECT * FROM afk WHERE user_id = ?"),
-        updateAfkReturn: this.db.prepare("UPDATE afk SET active = 0, return_time = ? WHERE user_id = ?"),
-        loadActiveAfkUsers: this.db.prepare("SELECT * FROM afk WHERE active = 1")
-      };
+      // Clear any stale AFK statuses that are more than 24 hours old
+      const twentyFourHoursAgo = Math.floor(Date.now() / 1000) - (24 * 60 * 60);
+      await runQuery(`
+        UPDATE afk_status 
+        SET active = 0, 
+            return_time = ?
+        WHERE active = 1 
+        AND afk_time < ?
+      `, [Math.floor(Date.now() / 1000), twentyFourHoursAgo]);
 
-      // Load currently AFK users from the database
-      const activeAfkUsers = this.preparedStatements.loadActiveAfkUsers.all();
-      activeAfkUsers.forEach(user => this.currentlyAfkUsers.set(user.user_id, user));
+      // Load active AFK users
+      const activeUsers = await allQuery("SELECT * FROM afk_status WHERE active = 1");
+      for (const user of activeUsers) {
+        const key = this.getUserKey(user.user_id, user.channel);
+        this.currentlyAfkUsers.set(key, user);
+        logger.debug(`Loaded active AFK: ${user.username} in ${user.channel}`);
+      }
 
-      const end = process.hrtime(start);
-      logger.info(`AFK database setup complete in ${end[0]}s ${end[1] / 1000000}ms`);
+      this.initialized = true;
+      logger.info('AFK module database setup complete');
     } catch (error) {
-      const end = process.hrtime(start);
-      logger.error(`Error setting up AFK database (took ${end[0]}s ${end[1] / 1000000}ms): ${error}`);
+      logger.error(`Error in AFK setup: ${error}`);
+      throw error; // Propagate the error to prevent partial initialization
     }
   }
 
-  handleAfkCommand({ channel, user, args, command }) {
-    const start = process.hrtime();
-    const userId = user.userId;
-    const username = user.username;
+  // Add a check for initialization
+  async ensureInitialized() {
+    if (!this.initialized) {
+      logger.debug('AFK module not initialized, waiting...');
+      await new Promise(resolve => setTimeout(resolve, 500));
+      if (!this.initialized) {
+        throw new Error('AFK module failed to initialize');
+      }
+    }
+  }
+
+  getUserKey(userId, channel) {
+    return `${userId}:${channel}`;
+  }
+
+  getBaseReason(command) {
+    // Get normalized command
+    const normalizedCommand = this.reasonAliases[command] || command;
     
-    if (!userId || !username) {
-      logger.error(`Invalid user object: ${JSON.stringify(user)}`);
-      return;
-    }
-
-    const baseReason = {
-      "afk": "AFK 🚶",
-      "sleep": "sleeping 😴",
-      "gn": "sleeping 😴",
-      "bed": "sleeping 😴",
-      "work": "working 💼",
-      "food": "eating 🍽️",
-      "gaming": "gaming 🎮",
-    }[command] || "AFK 🚶";
-    const reason = args.join(' ');
-    const fullReason = reason ? `${baseReason}: ${reason}` : baseReason;
-    const afkTime = Date.now() / 1000;
-
-    try {
-      this.preparedStatements.insertAfk.run(userId, username, afkTime, fullReason);
-      this.currentlyAfkUsers.set(userId, { user_id: userId, username, afk_time: afkTime, reason: fullReason, active: 1 });
-
-      this.bot.say(channel, `@${username} is now ${fullReason}`);
-      
-      const end = process.hrtime(start);
-      logger.debug(`Total AFK command handling took ${end[0]}s ${end[1] / 1000000}ms`);
-    } catch (error) {
-      const end = process.hrtime(start);
-      logger.error(`Error setting user AFK (took ${end[0]}s ${end[1] / 1000000}ms): ${error}`);
-    }
+    // Get base text and emoji
+    const emoji = this.reasonEmojis[normalizedCommand] || this.reasonEmojis.afk;
+    const baseText = normalizedCommand === 'afk' ? 'AFK' : `${normalizedCommand}ing`;
+    
+    return `${baseText} ${emoji}`;
   }
 
-  handleRafkCommand({ channel, user }) {
-    const start = process.hrtime();
-    const userId = user.userId;
+  async handleAfkCommand({ channel, user, args, command }) {
+    await this.ensureInitialized();
+    const userId = user.id || user.userId;
     const username = user.username;
+    const cleanChannel = channel.replace('#', '');
 
     try {
-      const afkInfo = this.currentlyAfkUsers.get(userId) || this.preparedStatements.selectAfk.get(userId);
+        // First check if user is already AFK
+        const existingAfk = await getQuery(`
+            SELECT * FROM afk_status 
+            WHERE user_id = ? 
+            AND channel = ? 
+            AND active = 1
+        `, [userId, cleanChannel]);
 
-      if (afkInfo) {
-        const { afk_time, reason: fullReason, return_time, active } = afkInfo;
-        if (active === 0) {
-          const timeSinceReturn = Date.now() / 1000 - (return_time || 0);
-          if (timeSinceReturn <= 5 * 60) { // 5 minutes
-            this.preparedStatements.insertAfk.run(userId, username, afk_time, fullReason);
-            this.currentlyAfkUsers.set(userId, { ...afkInfo, active: 1, return_time: null });
-
-            const timeSinceAfk = this.formatDurationString(Date.now() / 1000 - afk_time);
-            const resumeMessage = `${username} has resumed ${fullReason} (${timeSinceAfk} ago)`;
-            this.bot.say(channel, `@${resumeMessage}`);
-          } else {
-            this.bot.say(channel, `@${username}, it's been more than 5 minutes since you returned. Cannot resume AFK.`);
-          }
-        } else {
-          this.bot.say(channel, `@${username}, you are already AFK.`);
+        if (existingAfk) {
+            await this.bot.say(channel, `@${username}, you are already AFK: ${existingAfk.reason}`);
+            return;
         }
-      } else {
-        this.bot.say(channel, `@${username}, you have no AFK status to resume.`);
-      }
-      
-      const end = process.hrtime(start);
-      logger.debug(`Total RAFK command handling took ${end[0]}s ${end[1] / 1000000}ms`);
+
+        // Deactivate ALL previous AFK statuses for this user in this channel
+        await runQuery(`
+            UPDATE afk_status 
+            SET active = 0,
+                return_time = ?
+            WHERE user_id = ? 
+            AND channel = ?
+        `, [Math.floor(Date.now() / 1000), userId, cleanChannel]);
+
+        // Create new AFK status
+        const emoji = this.reasonEmojis[command] || this.reasonEmojis.afk;
+        const baseReason = command === 'afk' ? 'AFK' : `${command}ing`;
+        const reason = args.join(' ');
+        const fullReason = reason ? `${baseReason} ${emoji}: ${reason}` : `${baseReason} ${emoji}`;
+        const timestamp = Math.floor(Date.now() / 1000);
+
+        // Delete any existing rows for this user/channel combination
+        await runQuery(`
+            DELETE FROM afk_status 
+            WHERE user_id = ? 
+            AND channel = ?
+        `, [userId, cleanChannel]);
+
+        // Insert new AFK status
+        await runQuery(`
+            INSERT INTO afk_status (
+                user_id, 
+                channel, 
+                username, 
+                afk_time, 
+                reason, 
+                active
+            ) VALUES (?, ?, ?, ?, ?, 1)
+        `, [userId, cleanChannel, username, timestamp, fullReason]);
+
+        // Update cache
+        const userKey = this.getUserKey(userId, cleanChannel);
+        this.currentlyAfkUsers.set(userKey, {
+            userId,
+            channel: cleanChannel,
+            username,
+            afkTime: timestamp,
+            reason: fullReason,
+            active: 1
+        });
+
+        await this.bot.say(channel, `@${username} is now ${fullReason}`);
+
     } catch (error) {
-      const end = process.hrtime(start);
-      logger.error(`Error handling rafk command (took ${end[0]}s ${end[1] / 1000000}ms): ${error}`);
+        logger.error(`Error in AFK command: ${error}`);
+        // Clean up any partial state
+        await this.clearAfkStatus(userId, cleanChannel);
+        await this.bot.say(channel, `@${username}, there was an error processing your AFK status.`);
     }
   }
 
-  handleMessage(channel, user, message) {
-    if (this.isAfkCommand(message)) return;
+  async handleMessage(channel, user, message) {
+    await this.ensureInitialized();
+    // Don't process bot messages or commands
+    if (user.bot || message.startsWith('#')) return;
 
-    if (this.currentlyAfkUsers.has(user.userId)) {
-      this.handleAfkReturn(channel, user.userId, user.username);
-    }
-  }
+    const userId = user.id || user.userId;
+    const username = user.username;
+    const cleanChannel = channel.replace('#', '');
 
-  handleAfkReturn(channel, userId, username) {
-    const start = process.hrtime();
     try {
-      const afkInfo = this.currentlyAfkUsers.get(userId);
+        // Check if user is AFK
+        const afkStatus = await getQuery(`
+            SELECT * FROM afk_status 
+            WHERE user_id = ? 
+            AND channel = ? 
+            AND active = 1
+        `, [userId, cleanChannel]);
 
-      if (afkInfo && afkInfo.active === 1) {
-        this.sendAfkReturnMessage(channel, userId, username, afkInfo.afk_time, afkInfo.reason);
-        this.preparedStatements.updateAfkReturn.run(Date.now() / 1000, userId);
-        this.currentlyAfkUsers.delete(userId);
-      }
-      
-      const end = process.hrtime(start);
-      logger.debug(`Total AFK return handling took ${end[0]}s ${end[1] / 1000000}ms`);
+        if (afkStatus) {
+            const returnTime = Math.floor(Date.now() / 1000);
+            const duration = this.formatDurationString(returnTime - afkStatus.afk_time);
+            
+            // First send the return message
+            await this.bot.say(channel, 
+                `@${username} is no longer ${afkStatus.reason} (was away for ${duration})`
+            );
+
+            // Then update the database
+            await runQuery(`
+                UPDATE afk_status 
+                SET active = 0,
+                    return_time = ?
+                WHERE user_id = ? 
+                AND channel = ? 
+                AND active = 1
+            `, [returnTime, userId, cleanChannel]);
+
+            // Update cache
+            const userKey = this.getUserKey(userId, cleanChannel);
+            this.currentlyAfkUsers.delete(userKey);
+
+            logger.debug(`Broke AFK for ${username} in ${cleanChannel}`);
+        }
     } catch (error) {
-      const end = process.hrtime(start);
-      logger.error(`Error handling AFK return (took ${end[0]}s ${end[1] / 1000000}ms): ${error}`);
+        logger.error(`Error checking message for AFK: ${error}`);
+    }
+  }
+
+  async handleAfkReturn(channel, userId, username) {
+    const cleanChannel = channel.replace('#', '');
+    
+    try {
+        const afkStatus = await getQuery(`
+            SELECT * FROM afk_status 
+            WHERE user_id = ? 
+            AND channel = ? 
+            AND active = 1
+        `, [userId, cleanChannel]);
+
+        if (afkStatus) {
+            const returnTime = Math.floor(Date.now() / 1000);
+            
+            // Delete the AFK status instead of just marking inactive
+            await runQuery(`
+                DELETE FROM afk_status 
+                WHERE user_id = ? 
+                AND channel = ?
+            `, [userId, cleanChannel]);
+
+            // Update cache
+            const userKey = this.getUserKey(userId, cleanChannel);
+            this.currentlyAfkUsers.delete(userKey);
+
+            // Send return message
+            const duration = this.formatDurationString(returnTime - afkStatus.afk_time);
+            await this.bot.say(channel, 
+                `@${username} is no longer ${afkStatus.reason} (was away for ${duration})`
+            );
+
+            logger.debug(`Broke AFK for ${username} in ${cleanChannel}`);
+        }
+    } catch (error) {
+        logger.error(`Error handling AFK return: ${error}`);
+        await this.clearAfkStatus(userId, cleanChannel);
+    }
+  }
+
+  async handleRafkCommand({ channel, user }) {
+    await this.ensureInitialized();
+    const userId = user.id || user.userId;
+    const username = user.username;
+    const cleanChannel = channel.replace('#', '');
+
+    try {
+        // Check for recent AFK status - increased window to 30 minutes
+        const recentAfk = await getQuery(`
+            SELECT * FROM afk_status 
+            WHERE user_id = ? 
+            AND channel = ? 
+            AND active = 0 
+            AND return_time > ? 
+            ORDER BY return_time DESC 
+            LIMIT 1
+        `, [userId, cleanChannel, Math.floor(Date.now() / 1000) - 1800]); // 30 minutes
+
+        if (recentAfk) {
+            // Delete any existing active status first
+            await runQuery(`
+                DELETE FROM afk_status 
+                WHERE user_id = ? 
+                AND channel = ?
+            `, [userId, cleanChannel]);
+
+            // Insert new active status based on the recent one
+            await runQuery(`
+                INSERT INTO afk_status (
+                    user_id, 
+                    channel, 
+                    username, 
+                    afk_time, 
+                    reason, 
+                    active
+                ) VALUES (?, ?, ?, ?, ?, 1)
+            `, [userId, cleanChannel, username, recentAfk.afk_time, recentAfk.reason]);
+
+            // Update cache
+            const userKey = this.getUserKey(userId, cleanChannel);
+            this.currentlyAfkUsers.set(userKey, {
+                userId,
+                channel: cleanChannel,
+                username,
+                afkTime: recentAfk.afk_time,
+                reason: recentAfk.reason,
+                active: 1
+            });
+
+            const timeSinceAfk = this.formatDurationString(Date.now() / 1000 - recentAfk.afk_time);
+            await this.bot.say(channel, 
+                `@${username} has resumed their AFK status: ${recentAfk.reason} (originally went AFK ${timeSinceAfk} ago)`
+            );
+        } else {
+            await this.bot.say(channel, 
+                `@${username}, you don't have any recent AFK status to resume.`
+            );
+        }
+    } catch (error) {
+        logger.error(`Error handling RAFK command: ${error}`);
     }
   }
 
@@ -183,40 +350,125 @@ class AFK {
       { value: 1, label: 's' }
     ];
     
-    const parts = [];
+    let parts = [];
+    let remaining = Math.floor(duration);
+    
     for (const { value, label } of units) {
-      if (duration >= value || (parts.length === 0 && value === 1)) {
-        const count = Math.floor(duration / value);
+      if (remaining >= value) {
+        const count = Math.floor(remaining / value);
         parts.push(`${count}${label}`);
-        duration %= value;
+        remaining %= value;
         
-        // Break after adding seconds, or if we have two parts
-        if (label === 's' || parts.length === 2) break;
+        // Only show up to 2 most significant units
+        if (parts.length === 2) break;
       }
+    }
+    
+    // Ensure we show at least seconds if duration is very short
+    if (parts.length === 0) {
+      parts.push('0s');
     }
     
     return parts.join(' ');
   }
+
+  async getActiveAfkStatus(userId, channel) {
+    return await getQuery(`
+      SELECT * FROM afk_status 
+      WHERE user_id = ? 
+      AND channel = ? 
+      AND active = 1
+    `, [userId, channel]);
+  }
+
+  async setAfkStatus(userId, channel, username, timestamp, fullReason) {
+    await runQuery(`
+        UPDATE afk_status 
+        SET active = 0, 
+            return_time = ? 
+        WHERE user_id = ? 
+        AND channel = ?
+    `, [timestamp, userId, channel]);
+
+    await runQuery(`
+        INSERT INTO afk_status (
+            user_id, 
+            channel, 
+            username, 
+            afk_time, 
+            reason, 
+            active
+        ) VALUES (?, ?, ?, ?, ?, 1)
+    `, [userId, channel, username, timestamp, fullReason]);
+  }
+
+  // Add to AFK class
+  async _prepareStatements() {
+    this.preparedStatements = {
+      getActiveAfk: await this.db.prepare(`
+        SELECT * FROM afk_status 
+        WHERE user_id = ? AND channel = ? AND active = 1
+      `),
+      insertAfk: await this.db.prepare(`
+        INSERT INTO afk_status (user_id, channel, username, afk_time, reason, active)
+        VALUES (?, ?, ?, ?, ?, 1)
+      `),
+      updateAfkReturn: await this.db.prepare(`
+        UPDATE afk_status 
+        SET active = 0, return_time = ? 
+        WHERE user_id = ? AND channel = ? AND active = 1
+      `)
+    };
+  }
+
+  // Add a method to manually clear AFK status
+  async clearAfkStatus(userId, channel) {
+    await this.ensureInitialized();
+    const cleanChannel = channel.replace('#', '');
+    try {
+        // First delete any existing entries
+        await runQuery(`
+            DELETE FROM afk_status 
+            WHERE user_id = ? 
+            AND channel = ?
+        `, [userId, cleanChannel]);
+
+        const userKey = this.getUserKey(userId, cleanChannel);
+        this.currentlyAfkUsers.delete(userKey);
+        
+        logger.debug(`Manually cleared AFK status for user ${userId} in ${cleanChannel}`);
+    } catch (error) {
+        logger.error(`Error clearing AFK status: ${error}`);
+    }
+  }
 }
 
-let afkInstance = null;
-
+// Modify the setup function to properly expose the message handler
 export async function setupAfk(bot) {
-  if (!afkInstance) {
-    logger.info('Setting up AFK handlers');
-    afkInstance = new AFK(bot);
-    await afkInstance.setupDatabase();
-    logger.info('AFK handlers set up');
-  }
+  const afk = new AFK(bot);
+  await afk.setupDatabase();
+
+  // Create a message handler that will be used by the chat client
+  const messageHandler = async (channel, user, message, msg) => {
+    // Skip if it's a command
+    if (message.startsWith('#')) return;
+    
+    // Check if user is AFK and handle the return
+    await afk.handleMessage(channel, user, message);
+  };
+
+  // Return both commands and the message handler
   return {
-    afk: (context) => afkInstance.handleAfkCommand({ ...context, command: 'afk' }),
-    sleep: (context) => afkInstance.handleAfkCommand({ ...context, command: 'sleep' }),
-    gn: (context) => afkInstance.handleAfkCommand({ ...context, command: 'gn' }),
-    work: (context) => afkInstance.handleAfkCommand({ ...context, command: 'work' }),
-    food: (context) => afkInstance.handleAfkCommand({ ...context, command: 'food' }),
-    gaming: (context) => afkInstance.handleAfkCommand({ ...context, command: 'gaming' }),
-    bed: (context) => afkInstance.handleAfkCommand({ ...context, command: 'bed' }),
-    rafk: (context) => afkInstance.handleRafkCommand(context),
-    handleMessage: (channel, user, message) => afkInstance.handleMessage(channel, user, message),
+    // Commands
+    afk: async (context) => await afk.handleAfkCommand({
+      channel: context.channel,
+      user: context.user,
+      args: context.args,
+      command: 'afk'
+    }),
+    // ... other commands ...
+
+    // Export the message handler to be registered by the bot
+    messageHandler
   };
 }
