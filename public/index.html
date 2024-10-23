@@ -24,25 +24,51 @@
 
         <div class="status-dashboard">
             <div class="status-card">
-                <i class="fas fa-broadcast-tower"></i>
-                <h3>Bot Status</h3>
+                <div class="card-header">
+                    <i class="fas fa-broadcast-tower"></i>
+                    <h3>Bot Status</h3>
+                </div>
                 <div id="botStatus">Initializing...</div>
             </div>
             <div class="status-card">
-                <i class="fas fa-users"></i>
-                <h3>Active Channels</h3>
+                <div class="card-header">
+                    <i class="fas fa-users"></i>
+                    <h3>Active Channels</h3>
+                </div>
                 <div id="channelCount">Loading...</div>
             </div>
             <div class="status-card">
-                <i class="fas fa-clock"></i>
-                <h3>Uptime</h3>
+                <div class="card-header">
+                    <i class="fas fa-clock"></i>
+                    <h3>Uptime</h3>
+                </div>
                 <div id="uptime">Calculating...</div>
             </div>
-            <div class="status-card memory-chart-container">
-                <i class="fas fa-memory"></i>
-                <h3>Memory Usage</h3>
-                <div style="height: 200px; position: relative;">
-                    <canvas id="memoryChart"></canvas>
+            <div class="status-card performance-card">
+                <div class="card-header">
+                    <i class="fas fa-chart-line"></i>
+                    <h3>Performance</h3>
+                </div>
+                <div class="performance-stats">
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <span class="stat-label">Storage</span>
+                            <span class="stat-value" id="storageSize">0 B</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Message Rate</span>
+                            <span class="stat-value" id="messageRate">0/min</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Memory</span>
+                            <span class="stat-value" id="heapUsage">0 MB</span>
+                        </div>
+                    </div>
+                    <div class="memory-chart-section">
+                        <div class="chart-container">
+                            <canvas id="memoryChart"></canvas>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -100,14 +126,10 @@
 
         <div class="tab-content" id="commandsTab">
             <div class="commands-container">
-                <div class="commands-list" id="commandsList"></div>
-                <div class="add-command-form">
-                    <input type="text" id="newCommandName" placeholder="Command name">
-                    <input type="text" id="newCommandResponse" placeholder="Response">
-                    <button id="addCommandButton">
-                        <i class="fas fa-plus"></i> Add Command
-                    </button>
+                <div class="commands-header">
+                    <h3>Available Commands</h3>
                 </div>
+                <div class="commands-list" id="commandsList"></div>
             </div>
         </div>
 
@@ -126,3 +148,11 @@
                 </div>
             </div>
         </div>
+
+        <!-- Loading Indicator -->
+        <div id="loadingIndicator" class="loading-overlay">
+            <div class="loading-spinner"></div>
+        </div>
+    </div>
+</body>
+</html>

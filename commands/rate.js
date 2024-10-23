@@ -3,8 +3,6 @@ import { config } from '../config.js';
 import logger from '../logger.js';
 import { isMod, isVip } from '../index.js';
 import { ChatClient } from '@twurple/chat';
-import commandQueue from '../commandQueue.js';
-import { botStatusManager } from '../BotStatusManager.js';
 
 class RateInfo extends DataObject {
   constructor(data) {
@@ -16,10 +14,8 @@ class RateInfo extends DataObject {
 }
 
 class Rate {
-  constructor(bot) {
-    this.bot = bot;
-    // Use the bot's chat client instead
-    this.chatClient = bot.chatClient;
+  constructor(chatClient) {
+    this.chatClient = chatClient;
     this.rateLimiter = new Map();
   }
 
@@ -79,7 +75,8 @@ class Rate {
     await this.sendMessage(bot, channel, response);
   }
 
-  async handleIqCommand({ channel, user, args, bot }) {
+  async handleIqCommand(context) {
+    const { channel, user, args } = context;
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const iq = Math.floor(Math.random() * 201);
     let iqDescription = "thoughtless";
@@ -88,7 +85,7 @@ class Rate {
     if (iq > 115) iqDescription = "catNerd";
     if (iq > 199) iqDescription = "BrainGalaxy";
     const response = `@${mentionedUser} has ${iq} IQ. ${iqDescription}`;
-    await this.sendMessage(bot, channel, response);
+    await context.say(response);
   }
 
   async handleSusCommand({ channel, user, args, bot }) {
@@ -98,7 +95,8 @@ class Rate {
     await this.sendMessage(bot, channel, response);
   }
 
-  async handleAllCommand({ channel, user, args, bot }) {
+  async handleAllCommand(context) {
+    const { channel, user, args } = context;
     const mentionedUser = this.getMentionedUser(user, args[0]);
     logger.info(`Running all rate commands for @${mentionedUser}`);
 
@@ -115,7 +113,7 @@ class Rate {
 
     try {
       for (const message of messages) {
-        await this.sendMessage(bot, channel, message);
+        await context.say(message);
         // Add a delay between messages
         await new Promise(resolve => setTimeout(resolve, 100));
       }
@@ -124,13 +122,13 @@ class Rate {
       messages.forEach(msg => logger.botMessage(`${channel}: ${msg}`));
     } catch (error) {
       logger.error(`Error in handleAllCommand: ${error.message}`);
+      await context.say(`@${user.username}, Sorry, an error occurred.`);
     }
   }
 
-  async sendMessage(bot, channel, message) {
+  async sendMessage(channel, message) {
     try {
-      await botStatusManager.applyRateLimit(channel);
-      // Use the chatClient directly for better error handling
+      // Use the chatClient's say method directly
       await this.chatClient.say(channel, message);
       logger.debug(`Message sent to ${channel}: ${message}`);
     } catch (error) {

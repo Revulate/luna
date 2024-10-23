@@ -52,53 +52,26 @@ const youtube = google.youtube({
 const GPT_MODEL = "gpt-4o";
 
 class GptHandler {
-  constructor(bot) {
-    this.bot = bot;
+  constructor(chatClient) {
+    this.chatClient = chatClient;
     this.openai = new OpenAI({ apiKey: config.openai.apiKey });
-    this.apiClient = bot.api; // Use Twurple's ApiClient directly
+    this.apiClient = chatClient.apiClient; // Access API client through chat client
     
-    // Fix cache initialization
-    this.messageCache = new Map();
-    this.conversationCache = new NodeCache({ 
-      stdTTL: 1800, // 30 minutes
-      checkperiod: 600 // Check for expired entries every 10 minutes
-    });
-    this.promptCache = new NodeCache({ 
-      stdTTL: 3600,
-      checkperiod: 600 
-    });
-    this.responseCache = new NodeCache({ 
-      stdTTL: 3600,
-      checkperiod: 600 
-    });
-    
-    logger.info('Twitch client initialized for GPT handler');
-
-    this.lastMessageTime = new Map();
-    this.minTimeBetweenMessages = 300000; // 5 minutes minimum between messages
-    this.maxTimeBetweenMessages = 900000; // 15 minutes maximum between messages
-    this.isGeneratingMessage = false;
-    this.messageQueue = new Map();
-    this.conversationHistory = new Map(); // Unified conversation history
-    this.conversationCache = new Map();
-    this.maxCacheAge = 30 * 60 * 1000; // 30 minutes
-    this.maxCacheSize = 50; // Maximum number of messages to keep in cache per channel
-    this.promptCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 }); // 1 hour TTL, check every 10 minutes
+    // Initialize caches
+    this.maxCacheSize = 50;
+    this.promptCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
     this.responseCache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
     this.lastResponseTime = new Map();
     this.cooldownPeriod = 300000; // 5 minutes cooldown
-    this.enoughTimePassed = new Map(); // Add this line
-    bot.getChannels().forEach(channel => this.enoughTimePassed.set(channel, false)); // Initialize as false for all channels
-    this.summarizationInterval = 10 * 60 * 1000; // 10 minutes
-    this.lastSummarization = new Map();
-    this.autonomyChannel = 'revulate'; // Add this line to specify the channel for autonomy
-    this.lastMentionTime = new Map();
-    this.mentionCooldown = 300000; // 5 minutes cooldown for mentions
-    this.isProcessingGptCommand = false; // Add this line
-    this.lastRespondedMessageIds = new Map();
-    this.tokenLimit = 4096; // Set token limit
-    this.mentionQueue = new Map();
-    this.mentionProcessingInterval = 1000; // Process mention queue every second
+    this.enoughTimePassed = new Map();
+    
+    // Initialize channels using currentChannels property
+    const channels = chatClient.currentChannels || [];
+    channels.forEach(channel => {
+      this.enoughTimePassed.set(channel.replace('#', ''), false);
+    });
+    
+    logger.info('Twitch client initialized for GPT handler');
   }
 
   async getUserHistory(userId) {
@@ -491,18 +464,7 @@ class GptHandler {
   }
 
   async handleGptCommand(channel, user, args, message) {
-    this.isProcessingGptCommand = true;
-    
-    const timeout = setTimeout(() => {
-      this.isProcessingGptCommand = false;
-    }, 300000); // 5 minutes
-
     try {
-      if (!args || args.length === 0) {
-        await this.bot.say(channel, `@${user.username}, please provide a message after the #gpt command.`);
-        return;
-      }
-
       const prompt = args.join(' ');
       
       // Check for URLs in the prompt
@@ -510,14 +472,7 @@ class GptHandler {
       if (urlMatch) {
         const analysis = await this.analyzeContentInMessage(message);
         if (analysis) {
-          const response = await this.generateContentResponse(channel, user, message, analysis);
-          if (response) {
-            const finalResponse = response.startsWith(`@${user.username}`) ? 
-              response : 
-              `@${user.username} ${response}`;
-            await this.bot.say(channel, finalResponse);
-            return;
-          }
+          return `@${user.username} ${analysis}`;
         }
       }
 
@@ -530,8 +485,7 @@ class GptHandler {
       // Check cache first
       const cachedResponse = this.getFromCache(user.userId, prompt);
       if (cachedResponse) {
-        await this.bot.say(channel, `@${user.username} ${cachedResponse}`);
-        return;
+        return `@${user.username} ${cachedResponse}`;
       }
 
       const response = await this.openai.chat.completions.create({
@@ -546,13 +500,10 @@ class GptHandler {
       // Cache the response
       this.addToCache(user.userId, prompt, generatedResponse);
       
-      await this.bot.say(channel, `@${user.username} ${generatedResponse}`);
+      return `@${user.username} ${generatedResponse}`;
     } catch (error) {
       logger.error(`Error processing GPT command: ${error.message}`);
-      await this.bot.say(channel, `@${user.username}, Sorry, an error occurred while processing your request.`);
-    } finally {
-      clearTimeout(timeout);
-      this.isProcessingGptCommand = false;
+      return `@${user.username}, Sorry, an error occurred while processing your request.`;
     }
   }
 
@@ -1168,9 +1119,9 @@ class GptHandler {
   async getRecentMessages(channel, count) {
     try {
       // Use Twurple's chat client to get recent messages
-      const messages = await this.bot.chatClient.getRecentMessages(channel, count);
+      const messages = await this.chatClient.getRecentMessages(channel, count);
       return messages
-        .filter(msg => msg.userInfo.userName.toLowerCase() !== this.bot.userName.toLowerCase())
+        .filter(msg => msg.userInfo.userName.toLowerCase() !== this.chatClient.userName.toLowerCase())
         .map(msg => ({
           user: {
             name: msg.userInfo.userName,
@@ -1392,22 +1343,50 @@ async function getVideoTranscript(videoId) {
   return "Transcript unavailable"; // Simplified version
 }
 
-export function setupGpt(bot) {
-  const gptHandler = new GptHandler(bot);
-
-  const revulateChannel = bot.getChannels().find(channel => channel.toLowerCase() === 'revulate');
-  if (revulateChannel) {
-    logger.info(`Starting autonomous chat for channel: ${revulateChannel}`);
-    gptHandler.startAutonomousChat(revulateChannel);
-  } else {
-    logger.warn("The 'revulate' channel was not found in the bot's channel list.");
-  }
-
-  logger.info(`GPT setup completed. Channels: ${bot.getChannels().join(', ')}`);
-
+export function setupGpt(chatClient) {
+  const handler = new GptHandler(chatClient);
+  
   return {
-    gpt: (context) => gptHandler.handleGptCommand(context.channel, context.user, context.args, context.message),
-    tryGenerateAndSendMessage: (channel) => gptHandler.tryGenerateAndSendMessage(channel)
+    gpt: async (context) => {
+      try {
+        const { channel, user, args } = context;
+        if (!args || args.length === 0) {
+          await context.say(`@${user.username}, please provide a message after the #gpt command.`);
+          return;
+        }
+
+        const prompt = args.join(' ');
+        const response = await handler.handleGptCommand(channel, user, args, prompt);
+        if (response) {
+          await context.say(response);
+        }
+      } catch (error) {
+        logger.error(`Error in GPT command: ${error}`);
+        await context.say(`@${context.user.username}, Sorry, an error occurred.`);
+      }
+    },
+    ask: async (context) => {
+      // Alias for gpt command
+      return await exports.setupGpt(chatClient).gpt(context);
+    },
+    analyze: async (context) => {
+      try {
+        const { channel, user, args } = context;
+        if (!args || args.length === 0) {
+          await context.say(`@${user.username}, please provide content to analyze.`);
+          return;
+        }
+
+        const content = args.join(' ');
+        const analysis = await handler.analyzeContentInMessage(content);
+        if (analysis) {
+          await context.say(`@${user.username} ${analysis}`);
+        }
+      } catch (error) {
+        logger.error(`Error in analyze command: ${error}`);
+        await context.say(`@${context.user.username}, Sorry, an error occurred.`);
+      }
+    }
   };
 }
 

@@ -40,90 +40,115 @@ export class WebPanel {
       logger.info('Client connected to web panel');
       
       try {
-        // Send initial state
-        const initialState = await this.getInitialState();
-        socket.emit('initialState', initialState);
+        // Get initial channels and send them to the client
+        const channels = this.eventManager.getChannels();
+        logger.debug(`Initial channels on socket connection: ${channels}`);
+        
+        // Send initial channels to client
+        channels.forEach(channel => {
+          socket.emit('channelJoined', channel);
+        });
 
-        // Send recent logs using our existing logger implementation
-        const recentLogs = logger.getRecentLogs(100);
-        socket.emit('recentLogs', recentLogs);
+        // Get initial state
+        const status = await this.getBotStatus();
+        socket.emit('botStats', status);
 
-        // Set up event listeners
-        this.setupSocketListeners(socket);
-
-        // Start sending periodic updates
+        // Set up periodic status updates
         const updateInterval = setInterval(async () => {
           try {
             const status = await this.getBotStatus();
-            socket.emit('botStatus', status);
+            socket.emit('botStats', status);
           } catch (error) {
             logger.error('Error sending status update:', error);
           }
         }, 5000);
 
-        socket.on('disconnect', () => {
-          clearInterval(updateInterval);
-          logger.info('Client disconnected:', socket.id);
-        });
-
-        // Send initial bot stats
-        socket.on('requestStats', async () => {
-          try {
-            // Await all promises
-            const [messageCount, uniqueUsers] = await Promise.all([
-              this.messageLogger.getMessageCount(),
-              this.messageLogger.getUniqueUserCount()
-            ]);
-            
-            const channels = this.eventManager.getChannels();
-            
-            const stats = {
-              isConnected: this.chatClient.isConnected,
-              channels: channels,
-              messageCount: messageCount,
-              startTime: this.startTime,
-              memoryUsage: process.memoryUsage().heapUsed,
-              stats: {
-                totalMessages: messageCount,
-                uniqueUsers: uniqueUsers,
-                channelCount: channels.length
-              }
-            };
-            
-            console.log('Sending bot stats:', stats);
-            socket.emit('botStats', stats);
-          } catch (error) {
-            logger.error('Error getting stats:', error);
-            socket.emit('error', 'Failed to get stats');
-          }
-        });
-
-        // Handle channel join requests
+        // Handle channel join/leave requests
         socket.on('joinChannel', async (channel) => {
           try {
             await this.eventManager.joinChannel(channel);
             socket.emit('channelJoined', channel);
           } catch (error) {
-            socket.emit('error', `Failed to join channel: ${error.message}`);
+            logger.error('Error joining channel:', error);
+            socket.emit('error', 'Failed to join channel');
           }
         });
 
-        // Handle channel leave requests
         socket.on('leaveChannel', async (channel) => {
           try {
             await this.eventManager.leaveChannel(channel);
             socket.emit('channelLeft', channel);
           } catch (error) {
-            socket.emit('error', `Failed to leave channel: ${error.message}`);
+            logger.error('Error leaving channel:', error);
+            socket.emit('error', 'Failed to leave channel');
           }
         });
 
-        // Send initial channels
-        socket.on('getInitialChannels', () => {
-          const channels = this.eventManager.getChannels();
-          channels.forEach(channel => {
-            socket.emit('channelJoined', channel);
-          });
+        // Update chat message event handler
+        this.eventManager.on('chatMessage', (messageData) => {
+          // Format timestamp in ISO format
+          const formattedMessage = {
+            ...messageData,
+            timestamp: new Date(messageData.timestamp || Date.now()).toISOString()
+          };
+          
+          // Emit chat message once
+          this.io.emit('chatMessage', formattedMessage);
+          
+          // Log message once
+          const logEntry = {
+            timestamp: formattedMessage.timestamp,
+            level: 'INFO',
+            message: `${messageData.channel}: <${messageData.username}> ${messageData.message}`
+          };
+          this.io.emit('newLog', logEntry);
+        });
+
+        // Handle bot messages
+        socket.on('sendMessage', async (data) => {
+          try {
+            const { channel, message } = data;
+            logger.debug(`Attempting to send message to ${channel}: ${message}`);
+            
+            await this.chatClient.say(channel, message);
+            
+            const botMessageData = {
+              channel: channel,
+              userId: '0',
+              username: 'TatsLuna',
+              message: message,
+              timestamp: new Date().toISOString(),
+              badges: {},
+              color: '#6441A5'
+            };
+            
+            // Log to database and emit once
+            await this.messageLogger.logMessage(channel, botMessageData);
+            this.io.emit('chatMessage', botMessageData);
+            
+            logger.debug(`Message sent successfully to ${channel}`);
+          } catch (error) {
+            logger.error('Error sending message:', error);
+            socket.emit('error', 'Failed to send message');
+          }
+        });
+
+        socket.on('disconnect', () => {
+          clearInterval(updateInterval);
+          logger.info('Client disconnected');
+        });
+
+        // Add enhanced logging
+        this.messageLogger.addListener((logEntry) => {
+          const formattedLog = {
+            timestamp: new Date().toISOString(),
+            level: logEntry.level || 'INFO',
+            message: typeof logEntry === 'string' ? logEntry : logEntry.message,
+            metadata: logEntry.metadata || {}
+          };
+
+          socket.emit('newLog', formattedLog);
+          logger.debug('Emitted log:', formattedLog);
         });
 
       } catch (error) {
@@ -132,22 +157,10 @@ export class WebPanel {
       }
     });
 
-    // Listen for chat messages from TwitchEventManager
-    this.eventManager.on('chatMessage', (messageData) => {
-      // Ensure messageData has the correct format
-      const formattedMessage = {
-        channel: messageData.channel,
-        username: messageData.username,
-        userId: messageData.userId,
-        message: messageData.message,
-        badges: JSON.stringify(messageData.badges || {}),
-        color: messageData.color || '#FFFFFF',
-        timestamp: new Date().toISOString()
-      };
-      
-      // Emit to all connected clients
-      this.io.emit('chatMessage', formattedMessage);
-      logger.debug(`Chat message emitted: ${JSON.stringify(formattedMessage)}`);
+    // Listen for TwitchEventManager channel events
+    this.eventManager.on('channelJoined', (channel) => {
+      logger.debug(`Broadcasting channelJoined event for: ${channel}`);
+      this.io.emit('channelJoined', channel);
     });
 
     // Add listener for new log entries
@@ -160,125 +173,43 @@ export class WebPanel {
     });
   }
 
-  async getInitialState() {
-    try {
-      const channels = this.eventManager.getChannels();
-      const status = await this.getBotStatus();
-      const channelStats = new Map();
-
-      // Get messages and stats for each channel
-      for (const channel of channels) {
-        const messages = await this.messageLogger.getChannelMessages(channel, 100);
-        const stats = await this.messageLogger.getChannelStats(channel);
-        channelStats.set(channel, { messages, stats });
-      }
-
-      return {
-        status,
-        channels,
-        channelStats: Object.fromEntries(channelStats)
-      };
-    } catch (error) {
-      logger.error('Error getting initial state:', error);
-      throw error;
-    }
-  }
-
-  setupSocketListeners(socket) {
-    // Handle channel selection
-    socket.on('selectChannel', async (channel) => {
-      try {
-        const messages = await this.messageLogger.getChannelMessages(channel, 100);
-        const stats = await this.messageLogger.getChannelStats(channel);
-        socket.emit('channelMessages', { channel, messages, stats });
-      } catch (error) {
-        logger.error('Error fetching channel messages:', error);
-        socket.emit('error', 'Failed to fetch channel messages');
-      }
-    });
-
-    // Handle joining new channels
-    socket.on('joinChannel', async (channel) => {
-      try {
-        await this.eventManager.joinChannel(channel);
-        socket.emit('channelJoined', channel);
-      } catch (error) {
-        logger.error('Error joining channel:', error);
-        socket.emit('error', 'Failed to join channel');
-      }
-    });
-
-    // Handle leaving channels
-    socket.on('leaveChannel', async (channel) => {
-      try {
-        await this.eventManager.leaveChannel(channel);
-        socket.emit('channelLeft', channel);
-      } catch (error) {
-        logger.error('Error leaving channel:', error);
-        socket.emit('error', 'Failed to leave channel');
-      }
-    });
-
-    // Handle message sending
-    socket.on('sendMessage', async ({ channel, message }) => {
-      try {
-        await this.chatClient.say(channel, message);
-        socket.emit('messageSent', { success: true });
-      } catch (error) {
-        logger.error('Error sending message:', error);
-        socket.emit('error', 'Failed to send message');
-      }
-    });
-
-    // Handle status requests
-    socket.on('requestStatus', async () => {
-      try {
-        const status = await this.getBotStatus();
-        socket.emit('botStatus', status);
-      } catch (error) {
-        logger.error('Error getting bot status:', error);
-        socket.emit('error', 'Failed to get bot status');
-      }
-    });
-
-    // Handle channel list requests
-    socket.on('requestChannels', () => {
-      try {
-        const channels = this.eventManager.getChannels();
-        socket.emit('channelList', channels);
-      } catch (error) {
-        logger.error('Error getting channel list:', error);
-        socket.emit('error', 'Failed to get channel list');
-      }
-    });
-  }
-
   async getBotStatus() {
     try {
-      const stats = await this.messageLogger.getGlobalStats();
+      const globalStats = await this.messageLogger.getGlobalStats();
       const channels = this.eventManager.getChannels();
       const memory = process.memoryUsage();
+      const dbSize = await this.messageLogger.getDatabaseSize();
       
-      return {
-        connected: this.chatClient.isConnected,
+      // Calculate message rate for last minute
+      const minuteAgo = new Date(Date.now() - 60000);
+      const recentMessages = await this.messageLogger.getMessageCount(minuteAgo.toISOString());
+      const messageRate = Math.round((recentMessages || 0) / 60 * 100) / 100;
+
+      const status = {
+        isConnected: this.chatClient.isConnected, // Changed from 'connected' to 'isConnected'
         startTime: this.startTime,
-        channels: channels.map(channel => ({
-          name: channel,
-          stats: stats.channelStats?.[channel] || {}
-        })),
+        channels: channels,
+        messageCount: globalStats.totalMessages,
+        memoryUsage: memory.heapUsed,
         stats: {
-          totalMessages: stats.totalMessages || 0,
-          uniqueUsers: stats.uniqueUsers || 0,
+          totalMessages: globalStats.totalMessages || 0,
+          uniqueUsers: globalStats.uniqueUsers || 0,
           channelCount: channels.length,
-          messageRate: stats.messageRate || 0
-        },
-        memory: {
-          heapUsed: memory.heapUsed,
-          heapTotal: memory.heapTotal,
-          rss: memory.rss,
-          external: memory.external
+          messageRate: messageRate * 60,
+          dbSize: dbSize
         }
       };
+
+      logger.debug('Status update:', {
+        memory: {
+          heapUsed: `${Math.round(memory.heapUsed / 1024 / 1024)}MB`,
+          rss: `${Math.round(memory.rss / 1024 / 1024)}MB`,
+        },
+        dbSize: `${Math.round(dbSize / 1024 / 1024)}MB`,
+        messageRate: `${messageRate * 60}/min`
+      });
+
+      return status;
     } catch (error) {
       logger.error('Error getting bot status:', error);
       throw error;
@@ -295,5 +226,13 @@ export class WebPanel {
       logger.error('Error initializing web panel:', error);
       throw error;
     }
+  }
+
+  // Move formatBytes to be a class method
+  formatBytes(bytes) {
+    if (!bytes) return '0 B';
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
   }
 }

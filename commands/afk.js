@@ -4,8 +4,8 @@ import Database from 'better-sqlite3';
 import path from 'path';
 
 class AFK {
-  constructor(bot) {
-    this.bot = bot;
+  constructor(chatClient) {
+    this.chatClient = chatClient;
     this.db = null;
     this.statements = {};
     this.initialized = false;
@@ -25,21 +25,29 @@ class AFK {
     return `${userId}-${channel}`;
   }
 
-  async handleAfkCommand({ channel, user, args, command = 'afk' }) {
+  async handleAfkCommand(context) {
+    const { channel, user, args, command = 'afk' } = context;
     if (!this.initialized) {
       logger.error('AFK module not initialized');
       return;
     }
 
-    const userId = user.id.toString();
-    const username = user.username;
+    // Fix user ID extraction from Twurple context
+    const userId = user.id || user.userId || context.rawMessage?.userInfo?.userId;
+    const username = user.username || user.name || user.displayName;
+
+    if (!userId) {
+      logger.error('No user ID found in context:', { user, rawMessage: context.rawMessage });
+      return;
+    }
+
     const cleanChannel = channel.replace('#', '');
 
     try {
       // First check if user is already AFK
       const existingAfk = this.statements.getActiveAfk.get(userId, cleanChannel);
       if (existingAfk) {
-        await this.bot.say(channel, `@${username}, you are already AFK: ${existingAfk.reason}`);
+        await context.say(`@${username}, you are already AFK: ${existingAfk.reason}`);
         return;
       }
 
@@ -51,10 +59,7 @@ class AFK {
 
       // Begin transaction
       this.db.transaction(() => {
-        // Delete any existing AFK status first
         this.statements.deleteAfk.run(userId, cleanChannel);
-
-        // Insert new AFK status
         this.statements.insertAfk.run(
           userId,
           cleanChannel,
@@ -75,7 +80,7 @@ class AFK {
         active: 1
       });
 
-      await this.bot.say(channel, `@${username} is now ${fullReason}`);
+      await context.say(`@${username} is now ${fullReason}`);
     } catch (error) {
       logger.error(`Error in AFK command: ${error}`);
       await this.clearAfkStatus(userId, cleanChannel);
@@ -88,17 +93,24 @@ class AFK {
       return;
     }
 
-    const userId = context.user.id.toString();
+    // Fix user ID extraction from Twurple context
+    const userId = context.user.id || context.user.userId || context.rawMessage?.userInfo?.userId;
+    if (!userId) {
+      logger.error('No user ID found in context:', context.user);
+      return;
+    }
+
     const cleanChannel = context.channel.replace('#', '');
     const cutoffTime = Math.floor(Date.now() / 1000) - (30 * 60); // 30 minutes ago
 
     try {
       // Check for recent AFK status
-      const recentAfk = this.statements.getRecentAfk.get(userId, cleanChannel, cutoffTime);
+      const recentAfk = this.statements.getRecentAfk.get(userId.toString(), cleanChannel, cutoffTime);
       
       if (!recentAfk) {
-        await this.bot.say(context.channel, 
-          `@${context.user.username}, you don't have any recent AFK status to resume.`);
+        await context.say(
+          `@${context.user.username}, you don't have any recent AFK status to resume.`
+        );
         return;
       }
 
@@ -108,11 +120,11 @@ class AFK {
       // Begin transaction
       this.db.transaction(() => {
         // Delete any existing AFK status first
-        this.statements.deleteAfk.run(userId, cleanChannel);
+        this.statements.deleteAfk.run(userId.toString(), cleanChannel);
 
         // Insert new AFK status with the previous reason
         this.statements.insertAfk.run(
-          userId,
+          userId.toString(),
           cleanChannel,
           context.user.username,
           timestamp,
@@ -123,7 +135,7 @@ class AFK {
       // Update cache
       const userKey = this.getUserKey(userId, cleanChannel);
       this.currentlyAfkUsers.set(userKey, {
-        userId,
+        userId: userId.toString(),
         channel: cleanChannel,
         username: context.user.username,
         afkTime: timestamp,
@@ -131,11 +143,12 @@ class AFK {
         active: 1
       });
 
-      await this.bot.say(context.channel, `@${context.user.username} is now ${recentAfk.reason}`);
+      await context.say(`@${context.user.username} is now ${recentAfk.reason}`);
     } catch (error) {
       logger.error('Error in RAFK command:', error);
-      await this.bot.say(context.channel, 
-        `@${context.user.username}, an error occurred while processing your command.`);
+      await context.say(
+        `@${context.user.username}, an error occurred while processing your command.`
+      );
     }
   }
 
@@ -246,8 +259,8 @@ class AFK {
       };
 
       // Set up message handler using Twurple's chat client
-      if (this.bot.chatClient) {
-        this.bot.chatClient.onMessage(async (channel, user, message, msg) => {
+      if (this.chatClient) {
+        this.chatClient.onMessage(async (channel, user, message, msg) => {
           if (!message.startsWith('#')) {
             await this.handleUserMessage(channel, user, message, msg);
           }
@@ -283,7 +296,7 @@ class AFK {
         this.currentlyAfkUsers.delete(userKey);
 
         // Send return message - remove the duplicate AFK message
-        await this.bot.say(channel,
+        await this.chatClient.say(channel,
           `@${user} is no longer ${activeAfk.reason} (was away for ${duration})`
         );
       }
@@ -316,21 +329,23 @@ class AFK {
 }
 
 // Export setup function
-export async function setupAfk(bot) {
+export async function setupAfk(chatClient) {
   try {
-    const afk = new AFK(bot);
+    const afk = new AFK(chatClient);
     await afk.setupDatabase();
 
     return {
-      afk: async (context) => await afk.handleAfkCommand(context),
-      sleep: async (context) => await afk.handleAfkCommand({ ...context, command: 'sleep' }),
-      gn: async (context) => await afk.handleAfkCommand({ ...context, command: 'gn' }),
-      work: async (context) => await afk.handleAfkCommand({ ...context, command: 'work' }),
-      food: async (context) => await afk.handleAfkCommand({ ...context, command: 'food' }),
-      gaming: async (context) => await afk.handleAfkCommand({ ...context, command: 'gaming' }),
-      bed: async (context) => await afk.handleAfkCommand({ ...context, command: 'bed' }),
-      rafk: async (context) => await afk.handleRafkCommand(context),
-      clearafk: async (context) => await afk.clearAfkStatus(context.user.id, context.channel)
+      commands: {
+        afk: async (context) => await afk.handleAfkCommand(context),
+        sleep: async (context) => await afk.handleAfkCommand({ ...context, command: 'sleep' }),
+        gn: async (context) => await afk.handleAfkCommand({ ...context, command: 'gn' }),
+        work: async (context) => await afk.handleAfkCommand({ ...context, command: 'work' }),
+        food: async (context) => await afk.handleAfkCommand({ ...context, command: 'food' }),
+        gaming: async (context) => await afk.handleAfkCommand({ ...context, command: 'gaming' }),
+        bed: async (context) => await afk.handleAfkCommand({ ...context, command: 'bed' }),
+        rafk: async (context) => await afk.handleRafkCommand(context),
+        clearafk: async (context) => await afk.clearAfkStatus(context.user.id, context.channel)
+      }
     };
   } catch (error) {
     logger.error(`Error setting up AFK module: ${error}`);

@@ -17,12 +17,33 @@ function parseCSV(str, defaultValue = []) {
     return str ? str.split(',').map(s => s.trim()).filter(Boolean) : defaultValue;
 }
 
+// Add debug logging for channel parsing
+export function parseChannels(channelString) {
+  logger.debug(`Parsing channel string: ${channelString}`);
+  
+  if (!channelString) {
+    logger.warn('No channels provided in environment variables');
+    return [];
+  }
+
+  const channels = channelString.split(',')
+    .map(channel => channel.trim())
+    .filter(channel => {
+      const isValid = channel.length > 0;
+      if (!isValid) logger.debug(`Filtered out empty channel`);
+      return isValid;
+    });
+
+  logger.debug(`Parsed channels: ${JSON.stringify(channels)}`);
+  return channels;
+}
+
 export const config = {
     twitch: {
-        clientId: requireEnv('TWITCH_CLIENT_ID'),
-        clientSecret: requireEnv('TWITCH_CLIENT_SECRET'),
-        botUsername: process.env.BOT_NICK || 'TatsLuna',
-        channels: parseCSV(process.env.TWITCH_CHANNELS),
+        clientId: process.env.TWITCH_CLIENT_ID,
+        clientSecret: process.env.TWITCH_CLIENT_SECRET,
+        botUsername: process.env.TWITCH_BOT_USERNAME,
+        channels: parseChannels(process.env.TWITCH_CHANNELS),
         broadcasterUserId: requireEnv('BROADCASTER_USER_ID'),
         redirectUri: requireEnv('TWITCH_REDIRECT_URI'),
         adminUsers: parseCSV(process.env.ADMIN_USERS, ['revulate']),
@@ -90,18 +111,14 @@ function validateConfig() {
 try {
     validateConfig();
     
-    logger.debug('Configuration loaded successfully', {
-        botUsername: config.twitch.botUsername,
-        channels: config.twitch.channels,
-        adminUsers: config.twitch.adminUsers,
-        apis: {
-            youtube: config.youtube.apiKey ? '(set)' : '(not set)',
-            openai: config.openai.apiKey ? '(set)' : '(not set)',
-            steam: config.steam.apiKey ? '(set)' : '(not set)',
-            weather: config.weather.apiKey ? '(set)' : '(not set)',
-            nuuls: config.nuuls.apiKey ? '(set)' : '(not set)'
-        }
-    });
+    // Debug the final config
+    logger.debug(`Loaded config: ${JSON.stringify({
+      ...config,
+      twitch: {
+        ...config.twitch,
+        clientSecret: '[REDACTED]'
+      }
+    }, null, 2)}`);
 } catch (error) {
     logger.error('Configuration error:', error);
     process.exit(1);

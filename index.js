@@ -9,6 +9,8 @@ import TwitchEventManager from './TwitchEventManager.js';
 import messageLogger from './MessageLogger.js';
 import { WebPanel } from './webPanel.js';
 import dbManager from './database.js';
+// Add this import
+import { setupCommands } from './commands/commandSetup.js';
 
 dotenv.config();
 
@@ -61,19 +63,29 @@ async function main() {
     await authProvider.addUserForToken(tokenData, ['chat']);
 
     const apiClient = new ApiClient({ authProvider });
-    const chatClient = new ChatClient({ authProvider });
+    const chatClient = new ChatClient({ 
+      authProvider,
+      channels: config.twitch.channels
+    });
 
-    // Initialize TwitchEventManager with empty channels array
-    const eventManager = new TwitchEventManager(apiClient, chatClient, config.channels || []);
+    // Attach API client to chat client for easy access
+    chatClient.apiClient = apiClient;
+
+    // Connect chat client FIRST
+    logger.info('Connecting to Twitch chat...');
+    await chatClient.connect();
+    logger.info('Connected to Twitch chat');
+
+    // Initialize TwitchEventManager with both clients
+    const eventManager = new TwitchEventManager(apiClient, chatClient, config.twitch.channels);
+    logger.debug(`TwitchEventManager created with ${eventManager.getChannels().length} channels`);
     eventManager.setMessageLogger(messageLogger);
-    await eventManager.initialize();
-
-    // Initialize WebPanel with all required dependencies
+    
+    // Initialize WebPanel before joining channels
     const webPanel = new WebPanel({
       chatClient,
       eventManager,
       messageLogger,
-      getChannels: () => eventManager.getChannels(),
       startTime: Date.now(),
       commandCount: 0,
       isConnected: () => chatClient.isConnected,
@@ -83,8 +95,32 @@ async function main() {
 
     await webPanel.initialize();
 
-    // Connect chat client
-    await chatClient.connect();
+    // Initialize command system
+    logger.debug('Setting up commands...');
+    const { commands } = await setupCommands(chatClient);
+    logger.debug(`Commands setup complete. Registered commands: ${Array.from(commands.keys()).join(', ')}`);
+
+    // Set up command handling on the event manager
+    logger.debug('Setting up command event handler...');
+    eventManager.on('command', async (context) => {
+      logger.debug(`Received command event: ${context.commandName}`);
+      const command = commands.get(context.commandName);
+      if (command) {
+        logger.debug(`Executing command: ${context.commandName}`);
+        try {
+          await command(context);
+        } catch (error) {
+          logger.error(`Error executing command ${context.commandName}:`, error);
+          await chatClient.say(context.channel, 
+            `@${context.user.userName}, an error occurred while executing the command.`);
+        }
+      } else {
+        logger.debug(`Command not found: ${context.commandName}`);
+      }
+    });
+
+    // Finally, initialize the event manager to join channels
+    await eventManager.initialize();
 
     logger.info('Bot started successfully');
   } catch (error) {

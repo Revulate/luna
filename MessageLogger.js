@@ -13,6 +13,7 @@ class MessageLogger {
     this.logger = null;
     this.messageCache = new Map();
     this.listeners = new Set();
+    this.dbPath = path.join(process.cwd(), 'data', 'bot.db'); // Fix database path
   }
 
   async initialize() {
@@ -78,18 +79,23 @@ class MessageLogger {
 
   async logMessage(channel, messageData) {
     try {
-      // Format message data
+      // First ensure channel exists in channels table
+      await dbManager.run(`
+        INSERT OR IGNORE INTO channels (channel_name)
+        VALUES (?)
+      `, [channel.toLowerCase()]);
+
+      // Then log the message
       const formattedMessage = {
         channel: channel.toLowerCase(),
         username: messageData.username,
         user_id: messageData.userId,
         message: messageData.message,
         timestamp: new Date().toISOString(),
-        badges: messageData.badges,
-        color: messageData.color
+        badges: JSON.stringify(messageData.badges || {}),
+        color: messageData.color || '#FFFFFF'
       };
 
-      // Log to database
       await dbManager.run(`
         INSERT INTO channel_messages (
           channel, username, user_id, message, timestamp, badges, color
@@ -104,7 +110,7 @@ class MessageLogger {
         formattedMessage.color
       ]);
 
-      // Update cache
+      // Update cache and notify listeners
       if (!this.messageCache.has(channel)) {
         this.messageCache.set(channel, []);
       }
@@ -112,14 +118,6 @@ class MessageLogger {
       channelCache.push(formattedMessage);
       if (channelCache.length > 100) channelCache.shift();
 
-      // Log to Winston
-      this.logger.info('Chat message', {
-        channel: formattedMessage.channel,
-        username: formattedMessage.username,
-        message: formattedMessage.message
-      });
-
-      // Notify listeners (web panel)
       this.notifyListeners(formattedMessage);
 
     } catch (error) {
@@ -191,7 +189,6 @@ class MessageLogger {
 
   async getGlobalStats() {
     try {
-      // Use dbManager.db instead of this.db
       const stats = await dbManager.get(`
         SELECT 
           COUNT(*) as totalMessages,
@@ -202,7 +199,6 @@ class MessageLogger {
         FROM channel_messages
       `);
 
-      // Calculate message rate (messages per minute over the last hour)
       const hourAgo = new Date(Date.now() - 3600000);
       const recentMessages = await dbManager.get(`
         SELECT COUNT(*) as count
@@ -210,13 +206,16 @@ class MessageLogger {
         WHERE timestamp > ?
       `, [hourAgo.toISOString()]);
 
+      const dbSize = await this.getDatabaseSize();
+
       return {
-        totalMessages: stats.totalMessages,
-        uniqueUsers: stats.uniqueUsers,
-        channelCount: stats.channelCount,
-        messageRate: Math.round(recentMessages.count / 60),
+        totalMessages: stats.totalMessages || 0,
+        uniqueUsers: stats.uniqueUsers || 0,
+        channelCount: stats.channelCount || 0,
+        messageRate: Math.round((recentMessages.count || 0) / 60),
         firstMessage: stats.firstMessage,
-        lastMessage: stats.lastMessage
+        lastMessage: stats.lastMessage,
+        dbSize
       };
     } catch (error) {
       this.logger.error('Error getting global stats:', error);
@@ -224,7 +223,8 @@ class MessageLogger {
         totalMessages: 0,
         uniqueUsers: 0,
         channelCount: 0,
-        messageRate: 0
+        messageRate: 0,
+        dbSize: 0
       };
     }
   }
@@ -280,6 +280,41 @@ class MessageLogger {
 
   getLogger() {
     return this.logger;
+  }
+
+  async getDatabaseSize() {
+    try {
+      let totalSize = 0;
+      
+      // Get main database file size
+      const mainDbStats = await fs.stat(this.dbPath);
+      totalSize += mainDbStats.size;
+      this.logger.debug(`Main DB size: ${mainDbStats.size} bytes`);
+
+      // Get WAL file size
+      try {
+        const walStats = await fs.stat(`${this.dbPath}-wal`);
+        totalSize += walStats.size;
+        this.logger.debug(`WAL size: ${walStats.size} bytes`);
+      } catch (err) {
+        this.logger.debug('No WAL file found');
+      }
+      
+      // Get SHM file size
+      try {
+        const shmStats = await fs.stat(`${this.dbPath}-shm`);
+        totalSize += shmStats.size;
+        this.logger.debug(`SHM size: ${shmStats.size} bytes`);
+      } catch (err) {
+        this.logger.debug('No SHM file found');
+      }
+
+      this.logger.debug(`Total database size: ${totalSize} bytes`);
+      return totalSize;
+    } catch (error) {
+      this.logger.error('Error getting database size:', error);
+      return 0;
+    }
   }
 }
 

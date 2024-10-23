@@ -4,8 +4,9 @@ import { setupPreview } from './preview.js';
 import { setupAfk } from './afk.js';
 import { setupGpt } from './gpt.js';
 import MessageLogger from '../MessageLogger.js';
+import { setup7tv } from './7tv.js';
 
-export async function setupCommands(bot) {
+export async function setupCommands(chatClient) {
   logger.info('Starting setupCommands function');
   
   // Initialize MessageLogger if not already initialized
@@ -15,56 +16,116 @@ export async function setupCommands(bot) {
   
   const registeredCommands = new Map();
 
-  // Simplified helper function without queue
+  // Create a wrapper that includes both chatClient and apiClient
+  const createCommandContext = (context) => ({
+    ...context,
+    chatClient,
+    apiClient: chatClient.apiClient,
+    say: async (text) => await chatClient.say(context.channel, text)
+  });
+
   const registerCommand = (name, handler, source) => {
     if (!registeredCommands.has(name)) {
       const wrappedHandler = async (context) => {
         try {
-          await handler({ ...context, bot });
+          await handler(createCommandContext(context));
         } catch (error) {
-          logger.error(`Error in ${name} command: ${error}`);
-          await bot.say(context.channel, `@${context.user.username}, Sorry, an error occurred.`);
+          logger.error(`Error in ${name} command:`, error);
+          await chatClient.say(context.channel, 
+            `@${context.user.username}, Sorry, an error occurred.`);
         }
       };
       
       registeredCommands.set(name, wrappedHandler);
-      if (handler.aliases) {
-        handler.aliases.forEach(alias => {
-          registeredCommands.set(alias, wrappedHandler);
-          logger.debug(`Alias '${alias}' registered for '${name}'`);
-        });
-      }
       logger.debug(`Command '${name}' registered from ${source}`);
     }
   };
 
-  // Setup commands
-  const rateCommands = setupRate(bot);
+  // Setup commands with proper context
+  logger.debug('Setting up rate commands...');
+  const rateCommands = setupRate(chatClient);
   Object.entries(rateCommands).forEach(([name, handler]) => {
-    registerCommand(name, handler, 'Rate');
+    registerCommand(name.toLowerCase(), handler, 'Rate');
   });
 
-  const previewCommands = setupPreview(bot);
+  logger.debug('Setting up preview commands...');
+  const previewCommands = setupPreview(chatClient);
   Object.entries(previewCommands).forEach(([name, handler]) => {
-    registerCommand(name, handler, 'Preview');
+    const commandName = name.toLowerCase();
+    logger.debug(`Registering preview command: ${commandName}`);
+    registerCommand(commandName, handler, 'Preview');
   });
 
-  const { commands: afkCommands, handleAfkMessage } = await setupAfk(bot);
-  Object.entries(afkCommands).forEach(([name, handler]) => {
-    registerCommand(name, handler, 'AFK');
-  });
+  logger.debug('Setting up AFK commands...');
+  const afkSetup = await setupAfk(chatClient);
+  if (afkSetup && afkSetup.commands) {
+    Object.entries(afkSetup.commands).forEach(([name, handler]) => {
+      const commandName = name.toLowerCase();
+      logger.debug(`Registering AFK command: ${commandName}`);
+      registerCommand(commandName, handler, 'AFK');
+    });
+  }
 
-  const gptCommands = setupGpt(bot);
+  logger.debug('Setting up GPT commands...');
+  const gptCommands = setupGpt(chatClient);
   Object.entries(gptCommands).forEach(([name, handler]) => {
-    registerCommand(name, handler, 'GPT');
+    const commandName = name.toLowerCase();
+    logger.debug(`Registering GPT command: ${commandName}`);
+    registerCommand(commandName, handler, 'GPT');
+  });
+
+  logger.debug('Setting up 7TV commands...');
+  const sevenTvCommands = setup7tv(chatClient);
+  Object.entries(sevenTvCommands).forEach(([name, handler]) => {
+    const commandName = name.toLowerCase();
+    logger.debug(`Registering 7TV command: ${commandName}`);
+    registerCommand(commandName, handler, '7TV');
+  });
+
+  // Add utility commands
+  logger.debug('Setting up utility commands...');
+  const utilityCommands = {
+    stats: async (context) => {
+      const { channel, user } = context;
+      try {
+        const uptime = process.uptime();
+        const memory = process.memoryUsage();
+        const response = `@${user.username} Bot Stats • Uptime: ${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m • Memory: ${Math.round(memory.heapUsed/1024/1024)}MB`;
+        await context.say(response);
+      } catch (error) {
+        logger.error('Error in stats command:', error);
+        await context.say(`@${user.username}, Error getting stats.`);
+      }
+    },
+    ping: async (context) => {
+      const { channel, user } = context;
+      try {
+        const start = Date.now();
+        await context.apiClient.users.getUserByName('twitch');
+        const ping = Date.now() - start;
+        await context.say(`@${user.username} Pong! Latency: ${ping}ms`);
+      } catch (error) {
+        logger.error('Error in ping command:', error);
+        await context.say(`@${user.username}, Error checking ping.`);
+      }
+    }
+  };
+
+  Object.entries(utilityCommands).forEach(([name, handler]) => {
+    registerCommand(name, handler, 'Utility');
   });
 
   logger.info('All commands registered successfully');
   logger.debug(`Registered commands: ${Array.from(registeredCommands.keys()).join(', ')}`);
-  logger.info('Finished setupCommands function');
 
+  // Add at the end of setupCommands before return
+  logger.info(`Registered ${registeredCommands.size} commands:`);
+  registeredCommands.forEach((handler, name) => {
+    logger.debug(`- ${name}`);
+  });
+
+  // Just return the commands map
   return {
-    commands: registeredCommands,
-    handleAfkMessage
+    commands: registeredCommands
   };
 }
