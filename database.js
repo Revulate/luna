@@ -1,137 +1,204 @@
 import Database from 'better-sqlite3';
-import { config } from './config.js';
-import logger from './logger.js';
 import path from 'path';
-import fs from 'fs';
+import fs from 'fs/promises';
+import logger from './logger.js';
 
-function ensureDatabaseDirectory() {
-  const dbDir = path.join(process.cwd(), 'databases');
-  if (!fs.existsSync(dbDir)) {
-    fs.mkdirSync(dbDir, { recursive: true });
-  }
-  return dbDir;
-}
-
-class DatabasePool {
-  constructor(maxConnections = 5) {
-    this.pool = [];
-    this.maxConnections = maxConnections;
-    this.dbDir = ensureDatabaseDirectory();
+class DatabaseManager {
+  constructor() {
+    this.db = null;
+    this.statements = {};
   }
 
-  getConnection() {
-    if (this.pool.length > 0) {
-      return this.pool.pop();
+  async initialize() {
+    try {
+      const dbDir = path.join(process.cwd(), 'data');
+      await fs.mkdir(dbDir, { recursive: true });
+      
+      const dbPath = path.join(dbDir, 'bot.db');
+      this.db = new Database(dbPath, {
+        verbose: logger.debug,
+        fileMustExist: false,
+        timeout: 5000,
+        readonly: false,
+        strictTables: true
+      });
+
+      // Enable WAL mode and other optimizations
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('synchronous = NORMAL');
+      this.db.pragma('foreign_keys = ON');
+      
+      // Begin transaction for table creation
+      this.db.prepare('BEGIN').run();
+
+      // Create tables
+      this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS channels (
+          channel_name TEXT PRIMARY KEY,
+          joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          active BOOLEAN DEFAULT TRUE
+        );
+      `).run();
+
+      this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS channel_stats (
+          channel_name TEXT PRIMARY KEY,
+          message_count INTEGER DEFAULT 0,
+          user_count INTEGER DEFAULT 0,
+          last_active TIMESTAMP,
+          FOREIGN KEY (channel_name) REFERENCES channels(channel_name)
+        );
+      `).run();
+
+      // Add channel_messages table
+      this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS channel_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          channel TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          username TEXT NOT NULL,
+          message TEXT NOT NULL,
+          timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          badges TEXT,
+          color TEXT,
+          FOREIGN KEY (channel) REFERENCES channels(channel_name)
+        );
+      `).run();
+
+      this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS user_history (
+          user_id TEXT NOT NULL,
+          channel TEXT NOT NULL,
+          last_message TEXT,
+          last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          message_count INTEGER DEFAULT 0,
+          PRIMARY KEY (user_id, channel)
+        );
+      `).run();
+
+      this.db.prepare(`
+        CREATE TABLE IF NOT EXISTS queries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          query TEXT NOT NULL,
+          params TEXT,
+          timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `).run();
+
+      // Create indexes
+      this.db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_user_history_last_seen
+        ON user_history(last_seen);
+      `).run();
+
+      this.db.prepare(`
+        CREATE INDEX IF NOT EXISTS idx_channel_messages_timestamp
+        ON channel_messages(timestamp);
+      `).run();
+
+      this.db.prepare('COMMIT').run();
+
+      logger.debug('Database initialized successfully');
+      
+      // Initialize prepared statements
+      this.prepareStatements();
+      
+      return this;
+    } catch (error) {
+      logger.error('Error initializing database:', error);
+      throw error;
     }
-    if (this.pool.length + 1 <= this.maxConnections) {
-      const dbPath = path.join(this.dbDir, config.database.filename);
-      const db = new Database(dbPath, { verbose: logger.debug });
-      db.pragma('journal_mode = WAL');
-      return db;
-    }
-    throw new Error('Max connections reached');
   }
 
-  releaseConnection(db) {
-    this.pool.push(db);
-  }
-}
-
-const dbPool = new DatabasePool();
-
-let db; // Define db variable
-
-export async function initializeDatabase() {
-  try {
-    const dbDir = ensureDatabaseDirectory();
-    const dbPath = path.join(dbDir, config.database.filename);
-    db = new Database(dbPath, { verbose: logger.debug });
-
-    // Enable WAL mode for better concurrency
-    db.pragma('journal_mode = WAL');
-
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS user_stats (
-        user_id TEXT PRIMARY KEY,
-        username TEXT,
-        message_count INTEGER DEFAULT 0,
-        first_seen TIMESTAMP,
-        last_seen TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS steam_games (
-        appid INTEGER PRIMARY KEY,
-        name TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS user_histories (
-        user_id TEXT PRIMARY KEY,
-        history TEXT NOT NULL
-      );
+  prepareStatements() {
+    // Add prepared statements for channel_messages
+    this.statements = {
+      ...this.statements,
+      addMessage: this.db.prepare(`
+        INSERT INTO channel_messages (channel, user_id, username, message, badges, color)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `),
+      getChannelMessages: this.db.prepare(`
+        SELECT * FROM channel_messages 
+        WHERE channel = ? 
+        ORDER BY timestamp DESC 
+        LIMIT ?
+      `),
+      getGlobalStats: this.db.prepare(`
+        SELECT COUNT(*) as total_messages,
+               COUNT(DISTINCT user_id) as unique_users,
+               COUNT(DISTINCT channel) as active_channels
+        FROM channel_messages
+      `)
+    };
+    
+    // Add these new prepared statements
+    this.statements.getUserHistory = this.db.prepare(`
+        SELECT * FROM user_history 
+        WHERE user_id = ? AND channel = ?
     `);
+    this.statements.updateUserHistory = this.db.prepare(`
+        INSERT INTO user_history (user_id, channel, last_message, message_count)
+        VALUES (?, ?, ?, 1)
+        ON CONFLICT(user_id, channel) 
+        DO UPDATE SET 
+            last_message = ?,
+            last_seen = CURRENT_TIMESTAMP,
+            message_count = message_count + 1
+        WHERE user_id = ? AND channel = ?
+    `);
+  }
 
-    logger.info('Database initialized successfully');
-  } catch (error) {
-    logger.error('Error initializing database:', error);
-    throw error;
+  // Helper methods with proper transaction handling
+  run(query, params = []) {
+    return this.db.prepare(query).run(params);
+  }
+
+  get(query, params = []) {
+    return this.db.prepare(query).get(params);
+  }
+
+  all(query, params = []) {
+    return this.db.prepare(query).all(params);
+  }
+
+  // User history methods
+  getUserHistory(userId, channel) {
+    return this.statements.getUserHistory.get(userId, channel);
+  }
+
+  updateUserHistory(userId, channel, lastMessage) {
+    return this.db.transaction(() => {
+      return this.statements.updateUserHistory.run(
+        userId, channel, lastMessage, userId, channel
+      );
+    })();
+  }
+
+  // Channel methods
+  getActiveChannels() {
+    return this.statements.getActiveChannels.all();
+  }
+
+  addChannel(channel) {
+    return this.statements.addChannel.run(channel);
+  }
+
+  removeChannel(channel) {
+    return this.statements.removeChannel.run(channel);
   }
 }
 
-export function incrementMessageCount(userId, username) {
-  try {
-    const now = new Date().toISOString();
-    db.prepare(`
-      INSERT INTO user_stats (user_id, username, message_count, first_seen, last_seen)
-      VALUES (?, ?, 1, ?, ?)
-      ON CONFLICT(user_id) DO UPDATE SET
-        message_count = message_count + 1,
-        last_seen = ?
-    `).run(userId, username, now, now, now);
-  } catch (error) {
-    logger.error('Error incrementing message count:', error);
-  }
-}
+// Export singleton instance
+const dbManager = new DatabaseManager();
+export default dbManager;
 
-export function getUserStats(userId) {
-  try {
-    return db.prepare('SELECT * FROM user_stats WHERE user_id = ?').get(userId);
-  } catch (error) {
-    logger.error('Error getting user stats:', error);
-    return null;
-  }
-}
+// Export common query methods
+export const runQuery = (query, params) => dbManager.run(query, params);
+export const getQuery = (query, params) => dbManager.get(query, params);
+export const allQuery = (query, params) => dbManager.all(query, params);
 
-export function runQuery(query, params = []) {
-  const connection = dbPool.getConnection();
-  try {
-    return connection.prepare(query).run(...params);
-  } finally {
-    dbPool.releaseConnection(connection);
-  }
-}
-
-export function getQuery(query, params = []) {
-  const connection = dbPool.getConnection();
-  try {
-    return connection.prepare(query).get(...params);
-  } finally {
-    dbPool.releaseConnection(connection);
-  }
-}
-
-export function allQuery(query, params = []) {
-  const connection = dbPool.getConnection();
-  try {
-    return connection.prepare(query).all(...params);
-  } finally {
-    dbPool.releaseConnection(connection);
-  }
-}
-
-export function getUserHistory(userId) {
-  return getQuery('SELECT history FROM user_histories WHERE user_id = ?', [userId]);
-}
-
-export function updateUserHistory(userId, history) {
-  return runQuery('INSERT OR REPLACE INTO user_histories (user_id, history) VALUES (?, ?)', [userId, JSON.stringify(history)]);
-}
+// Export user history methods
+export const getUserHistory = (userId, channel) => dbManager.getUserHistory(userId, channel);
+export const updateUserHistory = (userId, channel, lastMessage) => 
+  dbManager.updateUserHistory(userId, channel, lastMessage);

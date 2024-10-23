@@ -17,7 +17,6 @@ import { Readable } from 'stream';
 import { google } from 'googleapis';
 import MessageLogger from '../MessageLogger.js';
 import NodeCache from 'node-cache';
-import TwitchAPI from '../twitch_api.js';
 import { OAuth2Client } from 'google-auth-library';
 
 const SYSTEM_PROMPT = (
@@ -53,11 +52,10 @@ const youtube = google.youtube({
 const GPT_MODEL = "gpt-4o";
 
 class GptHandler {
-  constructor(bot, twitchAPI) {
+  constructor(bot) {
     this.bot = bot;
     this.openai = new OpenAI({ apiKey: config.openai.apiKey });
-    this.twitchAPI = twitchAPI;
-    this.twitchClient = bot.api;
+    this.apiClient = bot.api; // Use Twurple's ApiClient directly
     
     // Fix cache initialization
     this.messageCache = new Map();
@@ -283,19 +281,19 @@ class GptHandler {
       logger.info(`Fetching stream data for channel: ${channelName}`);
       
       // Get user first using Twurple
-      const user = await this.twitchClient.users.getUserByName(channelName);
+      const user = await this.apiClient.users.getUserByName(channelName);
       if (!user) {
         return `Sorry, I couldn't find the Twitch channel: ${channelName}.`;
       }
 
       // Get stream data using Twurple
-      const stream = await this.twitchClient.streams.getStreamByUserId(user.id);
+      const stream = await this.apiClient.streams.getStreamByUserId(user.id);
       if (!stream) {
         return `The channel ${channelName} is currently offline.`;
       }
 
       // Get channel info for additional context
-      const channelInfo = await this.twitchClient.channels.getChannelInfoById(user.id);
+      const channelInfo = await this.apiClient.channels.getChannelInfoById(user.id);
 
       // Properly format the thumbnail URL using string replacement
       const thumbnailUrl = stream.thumbnailUrl
@@ -349,8 +347,8 @@ class GptHandler {
         return `${channelName} is live playing ${stream.gameName}. Stream title: "${stream.title}". Currently has ${stream.viewers} viewers.`;
       }
     } catch (error) {
-      logger.error('Error analyzing Twitch stream:', error);
-      return `Sorry, I couldn't analyze that Twitch stream. Error: ${error.message}`;
+      logger.error(`Error analyzing Twitch stream: ${error}`);
+      return 'Sorry, I encountered an error while analyzing the stream.';
     }
   }
 
@@ -1168,32 +1166,21 @@ class GptHandler {
   }
 
   async getRecentMessages(channel, count) {
-    logger.debug(`Fetching ${count} recent messages for channel: ${channel}`);
     try {
-      const messages = await this.twitchAPI.getRecentChannelMessages(channel, count);
-      
-      if (!messages || messages.length === 0) {
-        logger.warn(`No recent messages found for channel: ${channel}`);
-        return [];
-      }
-
-      // Filter out bot's own messages and format consistently
-      const filteredMessages = messages
-        .filter(msg => msg.user.name.toLowerCase() !== 'tatsluna')
+      // Use Twurple's chat client to get recent messages
+      const messages = await this.bot.chatClient.getRecentMessages(channel, count);
+      return messages
+        .filter(msg => msg.userInfo.userName.toLowerCase() !== this.bot.userName.toLowerCase())
         .map(msg => ({
           user: {
-            name: msg.user.name,
-            displayName: msg.user.displayName || msg.user.name
+            name: msg.userInfo.userName,
+            displayName: msg.userInfo.displayName
           },
-          message: msg.message,
-          timestamp: typeof msg.timestamp === 'string' ? 
-            new Date(msg.timestamp).getTime() : msg.timestamp
+          message: msg.text,
+          timestamp: msg.timestamp
         }));
-
-      logger.info(`Retrieved ${filteredMessages.length} recent messages for channel: ${channel}`);
-      return filteredMessages;
     } catch (error) {
-      logger.error(`Error fetching recent messages for channel ${channel}: ${error.message}`);
+      logger.error(`Error fetching recent messages: ${error}`);
       return [];
     }
   }
@@ -1212,7 +1199,7 @@ class GptHandler {
   async handleFunctionCall(functionName, args) {
     switch (functionName) {
       case "get_stream_info":
-        const streamInfo = await this.twitchAPI.getStreamByUsername(args.channel);
+        const streamInfo = await this.apiClient.streams.getStreamByUserName(args.channel);
         return streamInfo ? `${args.channel} is live playing ${streamInfo.gameName}` : `${args.channel} is offline`;
       // Add more function handlers as needed
       default:
@@ -1405,8 +1392,8 @@ async function getVideoTranscript(videoId) {
   return "Transcript unavailable"; // Simplified version
 }
 
-export function setupGpt(bot, twitchAPI) {
-  const gptHandler = new GptHandler(bot, twitchAPI);
+export function setupGpt(bot) {
+  const gptHandler = new GptHandler(bot);
 
   const revulateChannel = bot.getChannels().find(channel => channel.toLowerCase() === 'revulate');
   if (revulateChannel) {

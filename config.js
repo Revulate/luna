@@ -27,11 +27,15 @@ export const config = {
         redirectUri: requireEnv('TWITCH_REDIRECT_URI'),
         adminUsers: parseCSV(process.env.ADMIN_USERS, ['revulate']),
         commandPrefix: process.env.COMMAND_PREFIX || '#',
+        eventSub: {
+            retryAttempts: 3,
+            retryDelay: 1000,
+            connectTimeout: 10000
+        }
     },
     database: {
         filename: process.env.DB_PATH || 'bot.db',
         options: {
-            verbose: process.env.DB_VERBOSE === 'true',
             timeout: parseInt(process.env.DB_TIMEOUT) || 5000,
         }
     },
@@ -67,6 +71,10 @@ export const config = {
     rateLimit: {
         defaultDelay: parseInt(process.env.RATE_LIMIT_DELAY) || 1200, // 1.2 seconds
         modDelay: parseInt(process.env.MOD_RATE_LIMIT_DELAY) || 100 // 0.1 seconds
+    },
+    webPanel: {
+        port: process.env.WEB_PANEL_PORT || 3069,
+        password: process.env.WEB_PANEL_PASSWORD || 'changeme' // Make sure to set this in .env
     }
 };
 

@@ -3,7 +3,7 @@ import { config } from '../config.js';
 import logger from '../logger.js';
 import { isMod, isVip } from '../index.js';
 import { ChatClient } from '@twurple/chat';
-import { commandQueue } from '../commandQueue.js';
+import commandQueue from '../commandQueue.js';
 import { botStatusManager } from '../BotStatusManager.js';
 
 class RateInfo extends DataObject {
@@ -18,7 +18,8 @@ class RateInfo extends DataObject {
 class Rate {
   constructor(bot) {
     this.bot = bot;
-    this.chatClient = bot.chat;
+    // Use the bot's chat client instead
+    this.chatClient = bot.chatClient;
     this.rateLimiter = new Map();
   }
 
@@ -129,7 +130,8 @@ class Rate {
   async sendMessage(bot, channel, message) {
     try {
       await botStatusManager.applyRateLimit(channel);
-      await bot.say(channel, message);
+      // Use the chatClient directly for better error handling
+      await this.chatClient.say(channel, message);
       logger.debug(`Message sent to ${channel}: ${message}`);
     } catch (error) {
       logger.error(`Error sending message to ${channel}: ${error.message}`);

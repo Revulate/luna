@@ -8,7 +8,6 @@ class Stats {
   constructor(bot) {
     this.bot = bot;
     this.startTime = Date.now();
-    this.twitchAPI = new TwitchAPI();
   }
 
   async getDirectorySize(directory) {
@@ -69,14 +68,13 @@ class Stats {
   }
 
   async getPing() {
-    const start = Date.now();
     try {
-      // Use the Twitch API client directly
-      await this.twitchAPI.apiClient.users.getUserByName('twitch');
+      const start = Date.now();
+      await this.bot.twitchService.getUser('twitch');
       return Date.now() - start;
     } catch (error) {
       logger.error(`Error in getPing: ${error}`);
-      return 0; // Return 0 if there's an error
+      return 0;
     }
   }
 
@@ -102,11 +100,11 @@ class Stats {
   }
 }
 
-export function setupStats(bot) {
+export async function setupStats(bot) {
   const stats = new Stats(bot);
   return {
     stats: (context) => stats.handleStatsCommand(context),
     ping: (context) => stats.handlePingCommand(context),
-    uptime: (context) => stats.handleUptimeCommand(context), // Add this line
+    uptime: (context) => stats.handleUptimeCommand(context),
   };
 }

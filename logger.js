@@ -5,6 +5,25 @@ import fs from 'fs';
 
 const logLevel = process.env.LOG_LEVEL || 'debug';
 
+// Add memory transport to store recent logs
+const recentLogs = [];
+const MAX_LOGS = 1000;
+
+// Create a custom transport for memory logs
+const memoryTransport = new winston.transports.Console({
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  log: (info, callback) => {
+    recentLogs.unshift(info);
+    if (recentLogs.length > MAX_LOGS) {
+      recentLogs.pop();
+    }
+    callback();
+  }
+});
+
 // Ensure the winston log directory exists
 const winstonLogDir = path.join(process.cwd(), 'logs', 'winston');
 if (!fs.existsSync(winstonLogDir)) {
@@ -30,6 +49,7 @@ const logger = winston.createLogger({
     })
   ),
   transports: [
+    memoryTransport,
     new winston.transports.Console(),
     new winston.transports.DailyRotateFile({
       filename: path.join(winstonLogDir, 'error-%DATE%.log'),
@@ -46,5 +66,14 @@ const logger = winston.createLogger({
     })
   ]
 });
+
+// Add method to get recent logs
+logger.getRecentLogs = (limit = 100) => {
+  return recentLogs.slice(0, limit).map(log => ({
+    timestamp: log.timestamp,
+    level: log.level,
+    message: log.message
+  }));
+};
 
 export default logger;

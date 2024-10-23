@@ -58,3 +58,5 @@ tokens.json
 
 # Ignore all .txt files
 *.txt
+channel-tokens.json
+package-lock.json

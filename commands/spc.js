@@ -196,27 +196,36 @@ class Spc {
       this.logger.debug(`Game name provided. Found Game ID: ${finalGameID}`);
     }
 
-    const playerCount = await this.getCurrentPlayerCount(finalGameID);
-    if (playerCount === null) {
-      await bot.say(channel, `@${username}, could not retrieve player count for game ID ${finalGameID}.`);
-      return;
-    }
+    try {
+      const playerCount = await this.getCurrentPlayerCount(finalGameID);
+      if (!playerCount) {
+        await bot.say(channel, 
+          `@${username}, could not retrieve player count for ${gameName}.`
+        );
+        return;
+      }
 
-    const reviewsString = skipReviews ? "" : await this.getGameReviews(finalGameID);
-    const gameDetails = await this.getGameDetails(finalGameID);
-    if (!gameDetails) {
-      await bot.say(channel, `@${username}, could not retrieve details for game ID ${finalGameID}.`);
-      return;
-    }
+      const reviewsString = skipReviews ? "" : await this.getGameReviews(finalGameID);
+      const gameDetails = await this.getGameDetails(finalGameID);
+      if (!gameDetails) {
+        await bot.say(channel, `@${username}, could not retrieve details for game ID ${finalGameID}.`);
+        return;
+      }
 
-    const steamUrl = `https://store.steampowered.com/app/${finalGameID}`;
-    let reply = `${gameDetails.name} (by ${gameDetails.developers.join(', ')}) currently has **${playerCount}** players in-game.`;
-    reply += ` Steam URL: ${steamUrl}`;
-    if (reviewsString) {
-      reply += ` ${reviewsString}`;
-    }
+      const steamUrl = `https://store.steampowered.com/app/${finalGameID}`;
+      let reply = `${gameDetails.name} (by ${gameDetails.developers.join(', ')}) currently has **${playerCount}** players in-game.`;
+      reply += ` Steam URL: ${steamUrl}`;
+      if (reviewsString) {
+        reply += ` ${reviewsString}`;
+      }
 
-    await bot.say(channel, reply);
+      await bot.say(channel, reply);
+    } catch (error) {
+      logger.error(`Error in SPC command: ${error}`);
+      await this.bot.say(channel, 
+        `@${username}, an error occurred while fetching player count.`
+      );
+    }
   }
 
   parseArguments(args) {
