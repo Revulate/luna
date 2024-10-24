@@ -1,142 +1,123 @@
 import logger from '../logger.js';
-import fetch from 'node-fetch';
+import SevenTvApi from '../sevenTvApi.js';
 
 class SevenTVHandler {
   constructor(chatClient) {
     this.chatClient = chatClient;
     this.apiClient = chatClient.apiClient;
-    this.baseUrl = 'https://7tv.io/v3';
-    this.gqlUrl = 'https://7tv.io/v3/gql';
+    this.sevenTvApi = new SevenTvApi();
   }
 
-  async searchEmotes(query, filters = [], limit = 5) {
+  async handleEmoteCommand(context) {
+    const { user, args, channel } = context;
+
+    if (!args.length) {
+      await context.say(`@${user.username}, Usage: #emote <emote_name>`);
+      return;
+    }
+
+    const emoteName = args.join(' ');
     try {
-      const gqlQuery = {
-        operationName: 'SearchEmotes',
-        query: `
-          query SearchEmotes($query: String!, $limit: Int!, $page: Int!, $filter: EmoteSearchFilter) {
-            emotes(query: $query, limit: $limit, page: $page, filter: $filter) {
-              items {
-                id
-                name
-                owner {
-                  username
-                  display_name
-                }
-                flags
-                animated
-                host {
-                  url
-                  files {
-                    name
-                    format
-                  }
-                }
-              }
-            }
-          }
-        `,
-        variables: {
-          query,
-          limit,
-          page: 0,
-          filter: {
-            exact_match: filters.includes('exact'),
-            animated: filters.includes('animated'),
-            zero_width: filters.includes('zero'),
-            case_sensitive: false
-          }
-        }
-      };
+      logger.info(`User ${user.username} requested emote: ${emoteName} in channel: ${channel}`);
+      const channelName = channel.replace(/^#/, '');
+      const twitchID = await this.getTwitchUserID(channelName);
+      const emotes = await this.sevenTvApi.getChannelEmotes(twitchID);
 
-      const response = await fetch(this.gqlUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(gqlQuery)
-      });
+      const foundEmote = emotes.find(emote => 
+        emote.name.toLowerCase() === emoteName.toLowerCase() ||
+        emote.aliases.some(alias => alias.toLowerCase() === emoteName.toLowerCase())
+      );
 
-      if (!response.ok) {
-        logger.debug(`Search response status: ${response.status}`);
-        const errorText = await response.text();
-        logger.debug(`Error response: ${errorText}`);
-        return [];
+      if (!foundEmote) {
+        logger.warn(`Emote not found: ${emoteName} for user: ${user.username}`);
+        await context.say(`@${user.username} ⌲ No emote found matching "${emoteName}"`);
+        return;
       }
 
-      const data = await response.json();
-      logger.debug(`Search results: ${JSON.stringify(data)}`);
-      
-      return data.data?.emotes?.items || [];
+      logger.debug(`Found emote: ${foundEmote.name} by ${foundEmote.uploader}`);
+
+      // Fetch actor details
+      let actorName = 'Unknown';
+      if (foundEmote.actorId !== 'Unknown') {
+        const actorDetails = await this.sevenTvApi.getUserDetailsById(foundEmote.actorId);
+        actorName = actorDetails.displayName || actorDetails.username || 'Unknown';
+      }
+
+      const aliasText = foundEmote.aliases.length > 0 ? foundEmote.aliases.join(', ') : foundEmote.name;
+      const response = `@${user.username} ${foundEmote.name} [${aliasText}] • Added by: ${actorName} • ${foundEmote.emotePageUrl}`;
+      logger.info(`Responding to ${user.username} with emote details: ${response}`);
+      await context.say(response);
     } catch (error) {
-      logger.error('Error searching 7TV emotes:', error);
-      return [];
+      logger.error('Error in emote command:', error);
+      await context.say(`@${user.username} ⌲ Failed to check emote. Please try again later.`);
     }
   }
 
-  async getChannelEmotes(channelName) {
+  async getTwitchUserID(username) {
     try {
-      const twitchId = await this.getTwitchUserID(channelName);
-      if (!twitchId) {
-        logger.debug(`Could not find Twitch ID for: ${channelName}`);
-        return [];
+      logger.debug(`Fetching Twitch ID for username: ${username}`);
+      const user = await this.apiClient.users.getUserByName(username);
+      if (!user) {
+        logger.warn(`No Twitch user found for username: ${username}`);
+        return null;
       }
-
-      // GraphQL query for getting channel emotes
-      const gqlQuery = {
-        operationName: 'GetUserEmotes',
-        query: `
-          query GetUserEmotes($id: String!) {
-            user(id: $id) {
-              emote_set {
-                emotes {
-                  id
-                  name
-                  owner {
-                    username
-                    display_name
-                  }
-                  flags
-                  animated
-                  host {
-                    url
-                    files {
-                      name
-                      format
-                    }
-                  }
-                }
-              }
-            }
-          }
-        `,
-        variables: {
-          id: twitchId
-        }
-      };
-
-      const response = await fetch(this.gqlUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(gqlQuery)
-      });
-
-      if (!response.ok) {
-        logger.debug(`User response status: ${response.status}`);
-        return [];
-      }
-
-      const data = await response.json();
-      return data.data?.user?.emote_set?.emotes || [];
+      logger.info(`Found Twitch ID: ${user.id} for username: ${username}`);
+      return user.id;
     } catch (error) {
-      logger.error('Error fetching channel emotes:', error);
-      return [];
+      logger.error('Error fetching Twitch user ID:', error);
+      return null;
     }
   }
 
-  formatEmoteInfo(emote, isChannelEmote = false) {
+  async handleEmoteChannelsCommand(context, emoteId) {
+    const { user } = context;
+    try {
+      const data = await this.sevenTvApi.getEmoteChannels(emoteId);
+      const channels = data.emote.channels.items;
+
+      if (!channels || channels.length === 0) {
+        await context.say(`@${user.username} ⌲ No channels found using this emote.`);
+        return;
+      }
+
+      const channelList = channels.map(channel => channel.display_name).join(', ');
+      await context.say(`@${user.username} ⌲ Channels using this emote: ${channelList}`);
+    } catch (error) {
+      logger.error('Error fetching emote channels:', error);
+      await context.say(`@${user.username} ⌲ Failed to fetch channels using this emote. Please try again later.`);
+    }
+  }
+
+  async handle7TVCommand(context) {
+    const { user, args } = context;
+
+    if (!args.length) {
+      await context.say(`@${user.username}, Usage: #7tv search/animated/zero/trending <query>`);
+      return;
+    }
+
+    const subCommand = args[0].toLowerCase();
+    const query = args.slice(1).join(' ');
+
+    switch (subCommand) {
+      case 'search':
+        await this.handleSearchCommand(context, args.slice(1));
+        break;
+      case 'animated':
+        await this.handleAnimatedSearch(context, query);
+        break;
+      case 'zero':
+        await this.handleZeroWidthSearch(context, query);
+        break;
+      case 'trending':
+        await this.handleTrendingSearch(context, query);
+        break;
+      default:
+        await context.say(`@${user.username}, Invalid subcommand. Use: search, animated, zero, or trending`);
+    }
+  }
+
+  formatEmoteInfo(emote) {
     const tags = [];
     if (emote.animated) tags.push('ANIMATED');
     if (emote.flags & 1) tags.push('ZERO_WIDTH');
@@ -153,130 +134,187 @@ class SevenTVHandler {
     };
   }
 
-  async handleSearchCommand(context, args) {
-    const query = args.join(' ');
-
-    if (!query) {
-      await context.say(`@${context.user.username}, Please provide a search term.`);
-      return;
-    }
-
-    const emotes = await this.searchEmotes(query);
-    
-    if (emotes.length === 0) {
-      await context.say(`@${context.user.username} ⌲ No emotes found matching "${query}"`);
-      return;
-    }
-
-    const results = emotes.map((emote, index) => {
-      const tags = [];
-      if (emote.animated) tags.push('ANIMATED');
-      if (emote.flags & 1) tags.push('ZERO_WIDTH');
-      
-      const tagString = tags.length > 0 ? ` [${tags.join(', ')}]` : '';
-      return `${index + 1}. ${emote.name}${tagString} by ${emote.owner?.display_name || 'Unknown'} | ${emote.host.url}/3x (7tv.app/emotes/${emote.id})`;
-    }).join(' | ');
-
-    await context.say(`@${context.user.username} ⌲ Found: ${results}`);
-  }
-
-  async handle7tvCommand(context) {
-    const { channel, user, args } = context;
-
-    if (!args.length) {
-      await context.say(
-        `@${user.username}, Usage: #emote <emote_name> | #7tv search/animated/zero <query>`
-      );
-      return;
-    }
-
-    const firstArg = args[0].toLowerCase();
-
-    if (firstArg === 'search') {
-      const query = args.slice(1).join(' ');
-      const emotes = await this.searchEmotes(query, [], 5);
-      await this.displaySearchResults(context, emotes, query, 'matching');
-      return;
-    }
-    
-    if (firstArg === 'animated') {
-      const query = args.slice(1).join(' ');
-      const emotes = await this.searchEmotes(query, ['animated']);
-      await this.displaySearchResults(context, emotes, query, 'animated');
-      return;
-    }
-    
-    if (firstArg === 'zero') {
-      const query = args.slice(1).join(' ');
-      const emotes = await this.searchEmotes(query, ['zero']);
-      await this.displaySearchResults(context, emotes, query, 'zero-width');
-      return;
-    }
-
-    // Default behavior: search with exact match
-    const emoteName = args.join(' ');
-    const cleanChannelName = channel.replace(/^#/, '');
-    
+  async findExactEmote(emoteName) {
     try {
-      logger.debug(`Searching for emote: ${emoteName} in channel: ${cleanChannelName}`);
-      
-      const channelEmotes = await this.getChannelEmotes(cleanChannelName);
-      logger.debug(`Found ${channelEmotes.length} channel emotes`);
-
-      const channelEmote = channelEmotes.find(e => 
-        e.name.toLowerCase() === emoteName.toLowerCase()
-      );
-
-      if (channelEmote) {
-        const info = this.formatEmoteInfo(channelEmote, true);
-        const response = `@${user.username} ⌲ ${info.name} [${info.tags.join(', ')}] by ${info.creator} | ${info.cdnUrl} (${info.appUrl})`;
-        await context.say(response);
-      } else {
-        // Search with exact match filter
-        const searchResults = await this.searchEmotes(emoteName, ['exact'], 1);
-        if (searchResults.length > 0) {
-          const info = this.formatEmoteInfo(searchResults[0], false);
-          const response = `@${user.username} ⌲ ${info.name} [${info.tags.join(', ')}] by ${info.creator} | ${info.cdnUrl} (${info.appUrl})`;
-          await context.say(response);
-        } else {
-          await context.say(
-            `@${user.username} ⌲ No emote found matching "${emoteName}"`
-          );
+      logger.debug(`Finding exact emote: ${emoteName}`);
+      const gqlQuery = {
+        operationName: 'SearchEmotes',
+        query: `
+          query SearchEmotes($query: String!, $limit: Int!, $page: Int!) {
+            emotes(query: $query, limit: $limit, page: $page) {
+              items {
+                id
+                name
+                flags
+                state
+                owner {
+                  id
+                  username
+                  display_name
+                }
+                host {
+                  url
+                }
+                animated
+              }
+            }
+          }
+        `,
+        variables: {
+          query: emoteName,
+          page: 1,
+          limit: 1
         }
+      };
+
+      const response = await fetch(this.gqlUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(gqlQuery)
+      });
+
+      const data = await response.json();
+      logger.debug(`Exact emote lookup results: ${JSON.stringify(data)}`);
+      
+      const emote = data.data?.emotes?.items?.[0];
+      if (emote && emote.name.toLowerCase() === emoteName.toLowerCase()) {
+        logger.debug(`Found exact emote: ${emote.name}`);
+        return emote;
       }
+
+      return null;
     } catch (error) {
-      logger.error('Error in 7tv command:', error);
-      await context.say(
-        `@${user.username} ⌲ Failed to check emote. Please try again later.`
-      );
+      logger.error('Error finding exact emote:', error);
+      return null;
     }
   }
 
-  // Helper method to display search results
-  async displaySearchResults(context, emotes, query, filterType) {
-    if (emotes.length === 0) {
-      await context.say(`@${context.user.username} ⌲ No ${filterType} emotes found matching "${query}"`);
+  async handleSearchCommand(context, args) {
+    const { user } = context;
+    if (!args.length) {
+      await context.say(`@${user.username}, Usage: #7tv search <query>`);
       return;
     }
 
-    const results = emotes.map((emote, index) => {
-      const tags = [];
-      if (emote.animated) tags.push('ANIMATED');
-      if (emote.flags & 1) tags.push('ZERO_WIDTH');
-      
-      const tagString = tags.length > 0 ? ` [${tags.join(', ')}]` : '';
-      const appUrl = `https://7tv.app/emotes/${emote.id}`;
-      return `${index + 1}. ${emote.name}${tagString} by ${emote.owner?.display_name || 'Unknown'} | ${appUrl}`;
-    }).join(' | ');
+    const query = args.join(' ');
+    try {
+      const emotes = await this.sevenTvApi.getEmotesByQuery(query);
 
-    await context.say(`@${context.user.username} ⌲ Found ${filterType} emotes: ${results}`);
+      if (emotes.length === 0) {
+        await context.say(`@${user.username} ⌲ No emotes found for "${query}"`);
+        return;
+      }
+
+      const formattedEmotes = emotes.map(emote => {
+        const info = this.formatEmoteInfo(emote);
+        return `${info.name} - ${info.appUrl}`;
+      }).join(' | ');
+
+      await context.say(`@${user.username} ⌲ Found: ${formattedEmotes}`);
+
+    } catch (error) {
+      logger.error('Error searching emotes:', error);
+      await context.say(`@${user.username} ⌲ Failed to search emotes. Please try again later.`);
+    }
+  }
+
+  async handleAnimatedSearch(context, query) {
+    const { user } = context;
+    if (!query) {
+      await context.say(`@${user.username}, Usage: #7tv animated <query>`);
+      return;
+    }
+
+    try {
+      const emotes = await this.sevenTvApi.getEmotesByQuery(query);
+      const animatedEmotes = emotes.filter(e => e.animated);
+
+      if (animatedEmotes.length === 0) {
+        await context.say(`@${user.username} ⌲ No animated emotes found for "${query}"`);
+        return;
+      }
+
+      const formattedEmotes = animatedEmotes.slice(0, 5).map(emote => emote.name).join(', ');
+      await context.say(`@${user.username} ⌲ Animated emotes: ${formattedEmotes}`);
+
+    } catch (error) {
+      logger.error('Error searching animated emotes:', error);
+      await context.say(`@${user.username} ⌲ Failed to search animated emotes. Please try again later.`);
+    }
+  }
+
+  async handleZeroWidthSearch(context, query) {
+    const { user } = context;
+    if (!query) {
+      await context.say(`@${user.username}, Usage: #7tv zero <query>`);
+      return;
+    }
+
+    try {
+      const emotes = await this.sevenTvApi.getEmotesByQuery(query);
+      const zeroWidthEmotes = emotes.filter(e => e.flags & 1);
+
+      if (zeroWidthEmotes.length === 0) {
+        await context.say(`@${user.username} ⌲ No zero-width emotes found for "${query}"`);
+        return;
+      }
+
+      const formattedEmotes = zeroWidthEmotes.slice(0, 5).map(emote => emote.name).join(', ');
+      await context.say(`@${user.username} ⌲ Zero-width emotes: ${formattedEmotes}`);
+
+    } catch (error) {
+      logger.error('Error searching zero-width emotes:', error);
+      await context.say(`@${user.username} ⌲ Failed to search zero-width emotes. Please try again later.`);
+    }
+  }
+
+  async handleTrendingSearch(context, query) {
+    const { user } = context;
+    if (!query) {
+      await context.say(`@${user.username}, Usage: #7tv trending <query>`);
+      return;
+    }
+
+    try {
+      const emotes = await this.sevenTvApi.getEmotesByQuery(query, 'TRENDING_DESC');
+
+      if (emotes.length === 0) {
+        await context.say(`@${user.username} ⌲ No trending emotes found for "${query}"`);
+        return;
+      }
+
+      const formattedEmotes = emotes.slice(0, 5).map(emote => emote.name).join(', ');
+      await context.say(`@${user.username} ⌲ Trending emotes: ${formattedEmotes}`);
+
+    } catch (error) {
+      logger.error('Error searching trending emotes:', error);
+      await context.say(`@${user.username} ⌲ Failed to search trending emotes. Please try again later.`);
+    }
+  }
+
+  async reverseSearchEmote(emoteId) {
+    try {
+      const emote = await this.sevenTvApi.getEmoteDetails(emoteId);
+      logger.debug(`Reverse search emote results: ${JSON.stringify(emote)}`);
+      return emote;
+    } catch (error) {
+      logger.error('Error in reverse search emote:', error);
+      return null;
+    }
   }
 }
 
 export function setup7tv(chatClient) {
+  if (!chatClient.apiClient) {
+    logger.error('Missing API client in chat client');
+    return {};
+  }
+
   const handler = new SevenTVHandler(chatClient);
   return {
-    '7tv': async (context) => await handler.handle7tvCommand(context),
-    'emote': async (context) => await handler.handle7tvCommand(context) // Add emote command
+    'emote': async (context) => await handler.handleEmoteCommand(context),
+    '7tv': async (context) => await handler.handle7TVCommand(context)
   };
 }

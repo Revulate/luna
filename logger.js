@@ -1,79 +1,20 @@
-import winston from 'winston';
-import 'winston-daily-rotate-file';
+import { createLogger, format, transports } from 'winston';
 import path from 'path';
-import fs from 'fs';
 
-const logLevel = process.env.LOG_LEVEL || 'debug';
-
-// Add memory transport to store recent logs
-const recentLogs = [];
-const MAX_LOGS = 1000;
-
-// Create a custom transport for memory logs
-const memoryTransport = new winston.transports.Console({
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  log: (info, callback) => {
-    recentLogs.unshift(info);
-    if (recentLogs.length > MAX_LOGS) {
-      recentLogs.pop();
-    }
-    callback();
-  }
-});
-
-// Ensure the winston log directory exists
-const winstonLogDir = path.join(process.cwd(), 'logs', 'winston');
-if (!fs.existsSync(winstonLogDir)) {
-  fs.mkdirSync(winstonLogDir, { recursive: true });
-}
-
-const logger = winston.createLogger({
-  level: logLevel,
-  levels: {
-    error: 0,
-    warn: 1,
-    info: 2,
-    botMessage: 3,
-    debug: 4
-  },
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.printf(({ level, message, timestamp }) => {
-      if (typeof message === 'string' && (message.startsWith('[MESSAGE]') || message.startsWith('[BOT MESSAGE]'))) {
-        return `${timestamp} ${message}`;
-      }
-      return `${timestamp} [${level.toUpperCase()}] ${message}`;
+const logger = createLogger({
+  level: 'debug', // Ensure this is set to 'debug' to capture all logs
+  format: format.combine(
+    format.timestamp(),
+    format.printf(({ timestamp, level, message, ...meta }) => {
+      return `${timestamp} [${level.toUpperCase()}] ${message} ${
+        Object.keys(meta).length ? JSON.stringify(meta, null, 2) : ''
+      }`;
     })
   ),
   transports: [
-    memoryTransport,
-    new winston.transports.Console(),
-    new winston.transports.DailyRotateFile({
-      filename: path.join(winstonLogDir, 'error-%DATE%.log'),
-      datePattern: 'YYYY-MM-DD',
-      level: 'error',
-      maxSize: '20m',
-      maxFiles: '14d'
-    }),
-    new winston.transports.DailyRotateFile({
-      filename: path.join(winstonLogDir, 'combined-%DATE%.log'),
-      datePattern: 'YYYY-MM-DD',
-      maxSize: '20m',
-      maxFiles: '14d'
-    })
+    new transports.Console(),
+    new transports.File({ filename: path.join('logs', 'app.log'), level: 'debug' }) // Ensure file path is correct
   ]
 });
-
-// Add method to get recent logs
-logger.getRecentLogs = (limit = 100) => {
-  return recentLogs.slice(0, limit).map(log => ({
-    timestamp: log.timestamp,
-    level: log.level,
-    message: log.message
-  }));
-};
 
 export default logger;

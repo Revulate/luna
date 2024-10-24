@@ -79,6 +79,9 @@ class MessageLogger {
 
   async logMessage(channel, messageData) {
     try {
+      // Log the incoming message data for debugging
+      this.logger.debug('Logging message:', { channel, messageData });
+
       // First ensure channel exists in channels table
       await dbManager.run(`
         INSERT OR IGNORE INTO channels (channel_name)
@@ -318,6 +321,4 @@ class MessageLogger {
   }
 }
 
-// Create and export a singleton instance
-const messageLogger = new MessageLogger();
-export default messageLogger;
+export default new MessageLogger();

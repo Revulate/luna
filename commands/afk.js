@@ -93,24 +93,17 @@ class AFK {
       return;
     }
 
-    // Fix user ID extraction from Twurple context
-    const userId = context.user.id || context.user.userId || context.rawMessage?.userInfo?.userId;
-    if (!userId) {
-      logger.error('No user ID found in context:', context.user);
-      return;
-    }
-
+    const userId = context.user.id.toString();
     const cleanChannel = context.channel.replace('#', '');
     const cutoffTime = Math.floor(Date.now() / 1000) - (30 * 60); // 30 minutes ago
 
     try {
       // Check for recent AFK status
-      const recentAfk = this.statements.getRecentAfk.get(userId.toString(), cleanChannel, cutoffTime);
+      const recentAfk = this.statements.getRecentAfk.get(userId, cleanChannel, cutoffTime);
       
       if (!recentAfk) {
-        await context.say(
-          `@${context.user.username}, you don't have any recent AFK status to resume.`
-        );
+        await this.chatClient.say(context.channel, 
+          `@${context.user.username}, you don't have any recent AFK status to resume.`);
         return;
       }
 
@@ -120,11 +113,11 @@ class AFK {
       // Begin transaction
       this.db.transaction(() => {
         // Delete any existing AFK status first
-        this.statements.deleteAfk.run(userId.toString(), cleanChannel);
+        this.statements.deleteAfk.run(userId, cleanChannel);
 
         // Insert new AFK status with the previous reason
         this.statements.insertAfk.run(
-          userId.toString(),
+          userId,
           cleanChannel,
           context.user.username,
           timestamp,
@@ -135,7 +128,7 @@ class AFK {
       // Update cache
       const userKey = this.getUserKey(userId, cleanChannel);
       this.currentlyAfkUsers.set(userKey, {
-        userId: userId.toString(),
+        userId,
         channel: cleanChannel,
         username: context.user.username,
         afkTime: timestamp,
@@ -143,12 +136,11 @@ class AFK {
         active: 1
       });
 
-      await context.say(`@${context.user.username} is now ${recentAfk.reason}`);
+      await this.chatClient.say(context.channel, `@${context.user.username} is now ${recentAfk.reason}`);
     } catch (error) {
       logger.error('Error in RAFK command:', error);
-      await context.say(
-        `@${context.user.username}, an error occurred while processing your command.`
-      );
+      await this.chatClient.say(context.channel, 
+        `@${context.user.username}, an error occurred while processing your command.`);
     }
   }
 
