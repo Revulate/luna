@@ -6,7 +6,7 @@ import { setupGpt } from './gpt.js';
 import MessageLogger from '../MessageLogger.js';
 import { setup7tv } from './7tv.js';
 import { setupMessageLookup } from './messageLookup.js';
-import { setupSpc } from './steam.js';
+import { setupSteam } from './steam.js';
 import { setupDvp } from './dvp.js';
 import { setupStats } from './stats.js';
 
@@ -91,11 +91,13 @@ export async function setupCommands(bot) {
     registerCommand(name.toLowerCase(), handler, 'MessageLookup');
   });
 
-  // Setup SPC commands
-  logger.debug('Setting up SPC commands...');
-  const spcCommands = setupSpc(bot);
-  Object.entries(spcCommands).forEach(([name, handler]) => {
-    registerCommand(name.toLowerCase(), handler, 'SPC');
+  // Setup Steam commands
+  logger.debug('Setting up Steam commands...');
+  const steamCommands = setupSteam(bot);
+  Object.entries(steamCommands).forEach(([name, handler]) => {
+    const commandName = name.toLowerCase();
+    logger.debug(`Registering Steam command: ${commandName}`);
+    registerCommand(commandName, handler, 'Steam');
   });
 
   // Setup DVP commands
