@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dbManager from './database.js';
 import fs from 'fs/promises';
+import chalk from 'chalk';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,53 +14,152 @@ class MessageLogger {
     this.logger = null;
     this.messageCache = new Map();
     this.listeners = new Set();
-    this.dbPath = path.join(process.cwd(), 'data', 'bot.db'); // Fix database path
+    this.dbPath = path.join(process.cwd(), 'data', 'bot.db');
   }
 
   async initialize() {
     try {
-      // Create logs directory if it doesn't exist
       const logsDir = path.join(__dirname, 'logs');
       await fs.mkdir(logsDir, { recursive: true });
 
-      // Configure Winston logger
+      // Time formatter
+      const timeFormat = {
+        format: 'h:mm:ss A'
+      };
+
+      // Date formatter
+      const dateFormat = {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      };
+
+      let currentDate = new Date().toLocaleDateString('en-US', dateFormat);
+
+      // Helper function to wrap long messages
+      function wrapMessage(message, maxLength = 100) {
+        if (message.length <= maxLength) return message;
+        
+        const words = message.split(' ');
+        let lines = [];
+        let currentLine = '';
+        
+        words.forEach(word => {
+          if ((currentLine + ' ' + word).length <= maxLength) {
+            currentLine += (currentLine ? ' ' : '') + word;
+          } else {
+            if (currentLine) lines.push(currentLine);
+            currentLine = word;
+          }
+        });
+        
+        if (currentLine) lines.push(currentLine);
+        // Match padding with logger.js (20 spaces)
+        const padding = '                    '; // 20 spaces to align with message start
+        return lines.join('\n' + padding);
+      }
+
+      // Custom format for chat messages
+      const levelColors = {
+        error: 'redBright',
+        warn: 'yellowBright',
+        info: 'cyanBright',
+        debug: 'blueBright',
+        chat: 'magentaBright'
+      };
+
+      const chatFormat = winston.format.printf(({ timestamp, level, message, channel, username, content }) => {
+        const now = new Date(timestamp);
+        const time = now.toLocaleTimeString('en-US', timeFormat);
+        const grayTime = chalk.gray(time);
+        
+        // Keep level indicator white
+        const levelIndicator = chalk.white(`[${level.toUpperCase()}]`);
+        
+        let coloredMessage;
+        if (channel && username) {
+          coloredMessage = chalk.magentaBright(`Chat: #${channel} @${username}: ${content}`);
+        } else {
+          switch(level) {
+            case 'error':
+              coloredMessage = chalk.redBright(message);
+              break;
+            case 'warn':
+              coloredMessage = chalk.yellowBright(message);
+              break;
+            case 'info':
+              coloredMessage = chalk.cyanBright(message);
+              break;
+            case 'debug':
+              coloredMessage = chalk.blueBright(message);
+              break;
+            default:
+              coloredMessage = message;
+          }
+        }
+        
+        // Check if we've crossed to a new day
+        const newDate = now.toLocaleDateString('en-US', dateFormat);
+        if (newDate !== currentDate) {
+          currentDate = newDate;
+          return `\n${currentDate}\n${grayTime} ${levelIndicator} ${wrapMessage(coloredMessage)}`;
+        }
+        
+        return `${grayTime} ${levelIndicator} ${wrapMessage(coloredMessage)}`;
+      });
+
+      // Update colors in initialize() to use standard Winston color names
+      const colors = {
+        levels: {
+          error: 0,
+          warn: 1,
+          info: 2,
+          debug: 3,
+          chat: 4
+        },
+        colors: {
+          error: 'redBright',
+          warn: 'yellowBright',
+          info: 'cyanBright',
+          debug: 'blueBright',
+          chat: 'magentaBright'
+        }
+      };
+
+      winston.addColors(colors.colors);
+
       this.logger = winston.createLogger({
-        level: 'debug',
+        levels: colors.levels,
+        level: process.env.LOG_LEVEL || 'info',
         format: winston.format.combine(
           winston.format.timestamp(),
           winston.format.json()
         ),
         transports: [
+          // Console transport for chat messages
           new winston.transports.Console({
             format: winston.format.combine(
-              winston.format.colorize(),
               winston.format.timestamp(),
-              winston.format.printf(({ timestamp, level, message, ...meta }) => {
-                return `${timestamp} [${level.toUpperCase()}] ${message} ${
-                  Object.keys(meta).length ? JSON.stringify(meta, null, 2) : ''
-                }`;
-              })
+              chatFormat
             )
           }),
+          // File transport for detailed logging
           new winston.transports.DailyRotateFile({
-            filename: path.join(logsDir, 'bot-%DATE%.log'),
-            datePattern: 'YYYY-MM-DD',
-            maxSize: '20m',
-            maxFiles: '14d'
-          }),
-          new winston.transports.DailyRotateFile({
-            filename: path.join(logsDir, 'error-%DATE%.log'),
+            filename: path.join(logsDir, 'chat-%DATE%.log'),
             datePattern: 'YYYY-MM-DD',
             maxSize: '20m',
             maxFiles: '14d',
-            level: 'error'
+            level: process.env.LOG_LEVEL || 'info',
+            format: winston.format.combine(
+              winston.format.timestamp(),
+              winston.format.json()
+            )
           })
         ]
       });
 
-      // Initialize database connection
       await dbManager.initialize();
-
       this.logger.info('MessageLogger initialized successfully');
       return true;
     } catch (error) {
@@ -79,16 +179,19 @@ class MessageLogger {
 
   async logMessage(channel, messageData) {
     try {
-      // Log the incoming message data for debugging
-      this.logger.debug('Logging message:', { channel, messageData });
+      // Log chat message at INFO level
+      this.logger.info('', {
+        channel: channel.replace('#', ''),
+        username: messageData.username,
+        content: messageData.message
+      });
 
-      // First ensure channel exists in channels table
+      // Perform database operations silently unless in debug mode
       await dbManager.run(`
         INSERT OR IGNORE INTO channels (channel_name)
         VALUES (?)
       `, [channel.toLowerCase()]);
 
-      // Then log the message
       const formattedMessage = {
         channel: channel.toLowerCase(),
         username: messageData.username,

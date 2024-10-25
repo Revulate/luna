@@ -53,7 +53,7 @@ export const config = {
         }
     },
     logging: {
-        level: process.env.LOG_LEVEL || 'debug', // Use the log level from .env
+        level: process.env.LOG_LEVEL || 'info', // Use the log level from .env
         twurpleLevel: process.env.LOGGING || 'twurple=info;twurple:api:rate-limiter=warning'
     },
     youtube: {
