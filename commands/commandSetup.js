@@ -9,6 +9,7 @@ import { setupMessageLookup } from './messageLookup.js';
 import { setupSpc } from './spc.js';
 import { setupDvp } from './dvp.js';
 import { setupStats } from './stats.js';
+import { setupSteam } from './steam.js';
 
 export async function setupCommands(chatClient) {
   logger.info('Starting setupCommands function');
@@ -147,6 +148,11 @@ export async function setupCommands(chatClient) {
 
   Object.entries(utilityCommands).forEach(([name, handler]) => {
     registerCommand(name, handler, 'Utility');
+  });
+
+  const steamCommands = setupSteam();
+  Object.entries(steamCommands).forEach(([name, handler]) => {
+    registerCommand(name.toLowerCase(), handler, 'Steam');
   });
 
   logger.info('All commands registered successfully');

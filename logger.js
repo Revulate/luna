@@ -2,7 +2,7 @@ import { createLogger, format, transports } from 'winston';
 import path from 'path';
 
 const logger = createLogger({
-  level: process.env.LOG_LEVEL || 'info', // Use the log level from .env
+  level: process.env.LOG_LEVEL || 'debug', // Use the log level from .env
   format: format.combine(
     format.timestamp(),
     format.printf(({ timestamp, level, message, ...meta }) => {

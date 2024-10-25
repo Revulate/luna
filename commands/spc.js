@@ -7,6 +7,7 @@ import jsonStream from 'jsonstream/index.js';
 import { pipeline } from 'stream/promises';
 import path from 'path';
 import * as fuzzball from 'fuzzball';
+import { metaphone } from 'metaphone';
 
 class Spc {
   constructor(bot) {
@@ -124,7 +125,20 @@ class Spc {
       'destiny two': 'destiny 2',
       'diablo 2': 'diablo ii',
       'diablo two': 'diablo ii',
-      'diablo ii': 'diablo ii'
+      'diablo ii': 'diablo ii',
+      'gta5': 'grand theft auto v',
+      'gtav': 'grand theft auto v',
+      'gta 5': 'grand theft auto v',
+      'gta v': 'grand theft auto v',
+      'gta': 'grand theft auto',
+      'kakarot': 'dragon ball z: kakarot',
+      'dbz kakarot': 'dragon ball z: kakarot',
+      'dragon ball kakarot': 'dragon ball z: kakarot',
+      'dbz': 'dragon ball z',
+      'sparking zero': 'dragon ball: sparking! zero',
+      'sparking': 'dragon ball: sparking! zero',
+      'dbz sparking': 'dragon ball: sparking! zero',
+      'dragon ball sparking': 'dragon ball: sparking! zero'
     };
   }
 
@@ -170,9 +184,12 @@ class Spc {
       insertGame: this.db.prepare('INSERT OR REPLACE INTO Steam_Game (ID, Name, LastUpdated) VALUES (?, ?, ?)'),
       // Update the findGameByName query to be more flexible
       findGameByName: this.db.prepare(`
-        SELECT ID, Name 
+        SELECT DISTINCT ID, Name 
         FROM Steam_Game 
         WHERE LOWER(Name) LIKE LOWER(?)
+        OR LOWER(Name) LIKE LOWER(?)
+        OR LOWER(Name) LIKE LOWER(?)
+        OR LOWER(Name) LIKE LOWER(?)
         OR LOWER(Name) LIKE LOWER(?)
         OR LOWER(Name) LIKE LOWER(?)
       `),
@@ -285,6 +302,12 @@ class Spc {
       return;
     }
 
+    // Check if first argument is 'stats'
+    if (args[0]?.toLowerCase() === 'stats') {
+      await this.handleStatsCommand(username, args.slice(1).join(' '), say);
+      return;
+    }
+
     const { gameID, skipReviews, gameName } = this.parseArguments(args);
     if (gameID === null && gameName === null) {
       await say(`@${username}, please provide a game ID or name.`);
@@ -364,52 +387,30 @@ class Spc {
 
   async findGameIdByName(gameName) {
     this.logger.info(`Searching for game by name: ${gameName}`);
-    const normalizedGameName = this.normalizeGameName(gameName);
+    const normalizedGameName = this._normalizeGameName(gameName);
     const lowerGameName = normalizedGameName.toLowerCase();
     
     // First check cache
     if (this.gameCache.has(lowerGameName)) {
-        return this.gameCache.get(lowerGameName);
+        return this.gameCache.get(lowerGameName).id;
     }
 
     try {
         // First try exact matches with common variations
-        const commonVariations = {
-            // GTA variations
-            'gta 5': 'grand theft auto v',
-            'gta v': 'grand theft auto v',
-            'gta5': 'grand theft auto v',
-            'gtav': 'grand theft auto v',
-            // Diablo variations
-            'd4': 'diablo iv',
-            'd 4': 'diablo iv',
-            'diablo 4': 'diablo iv',
-            'diablo four': 'diablo iv',
-            'diablo iv': 'diablo iv',
-            // Final Fantasy variations
-            'ff7': 'final fantasy vii',
-            'ff 7': 'final fantasy vii',
-            'ffvii': 'final fantasy vii',
-            'ff vii': 'final fantasy vii',
-            'ff7r': 'final fantasy vii remake',
-            'ff7 remake': 'final fantasy vii remake',
-            'ff 7 remake': 'final fantasy vii remake',
-            'ffvii remake': 'final fantasy vii remake',
-            'ff vii remake': 'final fantasy vii remake',
-            // Destiny variations
-            'd2': 'destiny 2',
-            'destiny2': 'destiny 2',
-            'destiny 2': 'destiny 2'
-        };
-
-        // Try exact variation match first
-        const variationMatch = commonVariations[lowerGameName];
+        const variationMatch = this.gamePatterns[lowerGameName];
         if (variationMatch) {
-            const exactMatches = this.preparedStatements.findGameByName.all(
-                variationMatch,
-                `%${variationMatch}%`,
-                variationMatch.replace(/\s+/g, '%')
-            );
+            const searchName = variationMatch;
+            // Add variations with and without special characters
+            const searchVariations = [
+                searchName,
+                searchName.replace(/[!?:]/g, ''),
+                searchName.replace(/[!?:]/g, ' '),
+                `%${searchName}%`,
+                `%${searchName.replace(/[!?:]/g, '')}%`,
+                `%${searchName.replace(/[!?:]/g, ' ')}%`
+            ];
+            
+            const exactMatches = this.preparedStatements.findGameByName.all(...searchVariations);
             if (exactMatches.length > 0) {
                 const match = exactMatches[0];
                 this._updateGameCache(lowerGameName, match.ID);
@@ -417,64 +418,141 @@ class Spc {
             }
         }
 
-        // Get all potential matches from database
+        // If no variation match, try with original name
         const searchPatterns = [
             normalizedGameName,
             `%${normalizedGameName}%`,
-            normalizedGameName.replace(/\s+/g, '%')
+            normalizedGameName.replace(/\s+/g, '%'),
+            `${normalizedGameName}%`,
+            `%${normalizedGameName}`,
+            `%${normalizedGameName}%`
         ];
 
-        let games = [];
-        for (const pattern of searchPatterns) {
-            const results = this.preparedStatements.findGameByName.all(
-                pattern,
-                pattern,
-                pattern
-            );
-            games.push(...results);
+        // Add patterns with special characters removed
+        const noSpecialChars = normalizedGameName.replace(/[!?:]/g, '');
+        searchPatterns.push(
+            noSpecialChars,
+            `%${noSpecialChars}%`,
+            noSpecialChars.replace(/\s+/g, '%')
+        );
+
+        // Ensure we have exactly 6 patterns
+        while (searchPatterns.length < 6) {
+            searchPatterns.push(searchPatterns[0]);
+        }
+        searchPatterns.length = 6;  // Trim to exactly 6 if we have too many
+
+        const results = this.preparedStatements.findGameByName.all(...searchPatterns);
+        let games = [...results];
+
+        // Only try typo patterns if we don't have good matches yet
+        if (games.length === 0) {
+            const typoPatterns = this._generateTypoPatterns(normalizedGameName);
+            for (let i = 0; i < typoPatterns.length; i += 6) {
+                const batch = typoPatterns.slice(i, i + 6);
+                while (batch.length < 6) {
+                    batch.push(batch[0]); // Pad with duplicates to match parameter count
+                }
+                const typoResults = this.preparedStatements.findGameByName.all(...batch);
+                games.push(...typoResults);
+            }
         }
 
-        // Remove duplicates
-        games = [...new Map(games.map(game => [game.ID, game])).values()];
+        // Remove duplicates and filter out unwanted entries
+        games = [...new Map(games.map(game => [game.ID, game])).values()]
+            .filter(game => {
+                const name = game.Name.toLowerCase();
+                return !name.includes('soundtrack') &&
+                       !name.includes('artbook') &&
+                       !name.includes('dlc pack') &&
+                       !name.includes('season pass') &&
+                       !name.includes('demo version');
+            });
 
-        if (games.length === 0) return null;
+        if (games.length === 0) {
+            return null;
+        }
 
-        // Score matches using multiple strategies from fuzzball
+        // Enhanced scoring system
         const matches = games.map(game => {
             const gameName = game.Name.toLowerCase();
-            const normalizedGameTitle = this.normalizeGameName(game.Name);
+            
+            // Split game name to handle prefixes and suffixes
+            const parts = gameName.split(/[:|-]/);
+            const mainTitle = parts[parts.length - 1].trim();
+            const prefix = parts.length > 1 ? parts[0].trim() : '';
+
+            // Calculate various fuzzy match scores
+            const scores = {
+                // Exact match with full name
+                exactMatch: gameName === lowerGameName ? 100 : 0,
+                
+                // Exact match with main title
+                mainTitleExact: mainTitle === lowerGameName ? 90 : 0,
+                
+                // Partial ratio for substring matching
+                partialRatio: fuzzball.partial_ratio(lowerGameName, mainTitle),
+                
+                // Token sort ratio for word order independence
+                tokenSortRatio: fuzzball.token_sort_ratio(lowerGameName, gameName),
+                
+                // Token set ratio for handling extra/missing words
+                tokenSetRatio: fuzzball.token_set_ratio(lowerGameName, mainTitle),
+                
+                // Prefix bonus if search term matches game series
+                prefixBonus: prefix && (
+                    lowerGameName.includes(prefix) || 
+                    prefix.includes(lowerGameName)
+                ) ? 20 : 0,
+                
+                // Article-aware matching
+                articleMatch: (() => {
+                    const searchVariations = this._normalizeWithArticles(lowerGameName);
+                    const gameVariations = this._normalizeWithArticles(mainTitle);
+                    
+                    // Check if any variations match
+                    const hasMatch = searchVariations.some(searchVar => 
+                        gameVariations.some(gameVar => gameVar === searchVar)
+                    );
+                    
+                    return hasMatch ? 100 : 0;
+                })(),
+                
+                // Main title contains search term (boosted for exact word matches)
+                containsBonus: (() => {
+                    const searchVariations = this._normalizeWithArticles(lowerGameName);
+                    if (searchVariations.some(v => mainTitle === v)) return 30;
+                    if (searchVariations.some(v => mainTitle.includes(` ${v} `))) return 25;
+                    if (searchVariations.some(v => mainTitle.includes(v))) return 20;
+                    return 0;
+                })(),
+                
+                // Acronym matching
+                acronymScore: this._calculateAcronymScore(lowerGameName, mainTitle),
+                
+                // Series matching
+                seriesScore: this._calculateSeriesScore(lowerGameName, gameName)
+            };
+
+            // Calculate total score
+            const totalScore = (
+                (scores.exactMatch * 0.25) +
+                (scores.mainTitleExact * 0.15) +
+                (scores.partialRatio * 0.15) +
+                (scores.tokenSortRatio * 0.10) +
+                (scores.tokenSetRatio * 0.10) +
+                (scores.prefixBonus * 0.05) +
+                (scores.containsBonus * 0.05) +
+                (scores.acronymScore * 0.025) +
+                (scores.seriesScore * 0.025) +
+                (scores.articleMatch * 0.15)
+            );
 
             return {
                 game,
-                scores: {
-                    // Basic ratio for exact character matching
-                    ratio: fuzzball.ratio(normalizedGameName, normalizedGameTitle),
-                    // Partial ratio for substring matching
-                    partial: fuzzball.partial_ratio(normalizedGameName, normalizedGameTitle),
-                    // Token sort for word order independence
-                    tokenSort: fuzzball.token_sort_ratio(normalizedGameName, normalizedGameTitle),
-                    // Token set for handling extra/missing words
-                    tokenSet: fuzzball.token_set_ratio(normalizedGameName, normalizedGameTitle),
-                    // Token similarity for better abbreviation handling
-                    tokenSimilarity: fuzzball.token_similarity_sort_ratio(normalizedGameName, normalizedGameTitle, {
-                        sortBySimilarity: true
-                    }),
-                    // Exact match bonus
-                    exact: gameName === lowerGameName ? 100 : 0
-                }
+                scores,
+                totalScore
             };
-        });
-
-        // Calculate weighted scores
-        matches.forEach(match => {
-            match.totalScore = (
-                (match.scores.ratio * 0.2) +
-                (match.scores.partial * 0.2) +
-                (match.scores.tokenSort * 0.2) +
-                (match.scores.tokenSet * 0.2) +
-                (match.scores.tokenSimilarity * 0.1) +
-                (match.scores.exact * 0.1)
-            );
         });
 
         // Sort by total score
@@ -490,16 +568,28 @@ class Spc {
         );
 
         // Return best match if score is high enough
-        if (matches[0].totalScore >= 75) {
+        if (matches[0].totalScore >= 50 || 
+            (matches[0].scores.partialRatio === 100 && 
+             matches[0].scores.tokenSetRatio === 100 && 
+             matches[0].totalScore >= 35)) {
             const bestMatch = matches[0].game;
             this._updateGameCache(lowerGameName, bestMatch.ID);
             return bestMatch.ID;
         }
 
+        // If no good match, return suggestions
+        if (matches.length > 0) {
+            const suggestions = matches
+                .slice(0, 3)
+                .map(m => `${m.game.Name} (${Math.round(m.totalScore)}% match)`)
+                .join(', ');
+            throw new Error(`No exact match found. Did you mean: ${suggestions}?`);
+        }
+
         return null;
     } catch (error) {
         this.logger.error(`Error during game search: ${error}`);
-        return null;
+        throw error;
     }
   }
 
@@ -575,10 +665,23 @@ class Spc {
   }
 
   _updateGameCache(key, value) {
-    this.gameCache.set(key, value);
+    this.gameCache.set(key, {
+        id: value,
+        timestamp: Date.now()
+    });
     if (this.gameCache.size > this.MAX_CACHE_SIZE) {
-      const firstKey = this.gameCache.keys().next().value;
-      this.gameCache.delete(firstKey);
+        // Remove oldest entries first
+        const now = Date.now();
+        for (const [k, v] of this.gameCache.entries()) {
+            if (now - v.timestamp > 3600000) { // 1 hour
+                this.gameCache.delete(k);
+            }
+        }
+        // If still over size, remove oldest entry
+        if (this.gameCache.size > this.MAX_CACHE_SIZE) {
+            const firstKey = this.gameCache.keys().next().value;
+            this.gameCache.delete(firstKey);
+        }
     }
   }
 
@@ -861,6 +964,209 @@ class Spc {
     }
     
     return false;
+  }
+
+  // Add new method for handling stats
+  async handleStatsCommand(username, gameName, say) {
+    if (!gameName) {
+      await say(`@${username}, Please provide a game name.`);
+      return;
+    }
+
+    try {
+      const gameID = await this.findGameIdByName(gameName);
+      if (!gameID) {
+        await say(`@${username}, no games found for your query: '${gameName}'.`);
+        return;
+      }
+
+      // Get current players from Steam API
+      const playerCount = await this.getCurrentPlayerCount(gameID);
+      if (!playerCount) {
+        await say(`@${username}, could not retrieve player count for ${gameName}.`);
+        return;
+      }
+
+      const gameDetails = await this.getGameDetails(gameID);
+      if (!gameDetails) {
+        await say(`@${username}, could not retrieve details for game ID ${gameID}.`);
+        return;
+      }
+
+      // Get Steam Charts data for peaks
+      try {
+        const steamChartsUrl = `https://steamcharts.com/app/${gameID}/chart-data.json`;
+        const response = await fetch(steamChartsUrl);
+        const steamChartsData = await response.json();
+
+        // Calculate peaks from Steam Charts data
+        const last24Hours = steamChartsData.slice(-24);
+        const peak24h = Math.max(...last24Hours.map(d => d[1]).filter(Boolean));
+        const allTimePeak = Math.max(...steamChartsData.map(d => d[1]).filter(Boolean));
+
+        await say(
+          `@${username}, ${gameDetails.name} Stats • Current Players: ${playerCount.toLocaleString()} • 24h Peak: ${peak24h.toLocaleString()} • All-Time Peak: ${allTimePeak.toLocaleString()}`
+        );
+      } catch (chartsError) {
+        // If Steam Charts fails, just show current players
+        this.logger.error(`Steam Charts fetch failed: ${chartsError}`);
+        await say(
+          `@${username}, ${gameDetails.name} Stats • Current Players: ${playerCount.toLocaleString()}`
+        );
+      }
+    } catch (error) {
+      this.logger.error(`Error in SPC stats command: ${error}`);
+      await say(
+        `@${username}, an error occurred while fetching player statistics.`
+      );
+    }
+  }
+
+  // Add new helper methods
+  _generateTypoPatterns(name) {
+    const patterns = [];
+    // Handle common typos by replacing similar characters
+    const typoMap = {
+        'a': ['e', '@'],
+        'e': ['a', '3'],
+        'i': ['1', 'l', '!'],
+        'o': ['0'],
+        's': ['5', '$'],
+        't': ['7'],
+        'b': ['6'],
+        'g': ['9'],
+        'z': ['2']
+    };
+
+    // Generate patterns with common typos
+    for (let i = 0; i < name.length; i++) {
+        const char = name[i].toLowerCase();
+        if (typoMap[char]) {
+            typoMap[char].forEach(replacement => {
+                patterns.push(
+                    name.slice(0, i) + replacement + name.slice(i + 1)
+                );
+            });
+        }
+    }
+
+    return patterns;
+  }
+
+  _calculateAcronymScore(searchTerm, gameName) {
+    // Create acronym from game name
+    const acronym = gameName.split(' ')
+        .map(word => word[0])
+        .join('')
+        .toLowerCase();
+
+    // Check if search term matches acronym
+    if (searchTerm === acronym) {
+        return 100;
+    }
+
+    // Check if search term is part of acronym
+    if (acronym.includes(searchTerm)) {
+        return 50;
+    }
+
+    return 0;
+  }
+
+  // Add this method to the class
+  _simplePhonetic(str) {
+    return str.toLowerCase()
+        .replace(/[aeiou]/g, 'a')  // Convert all vowels to 'a'
+        .replace(/[bfpv]/g, 'b')   // Similar sounding consonants
+        .replace(/[cghjkq]/g, 'c')
+        .replace(/[dt]/g, 'd')
+        .replace(/[mn]/g, 'm')
+        .replace(/[lr]/g, 'r')
+        .replace(/[sz]/g, 's')
+        .replace(/[xy]/g, 'x')
+        .replace(/w/g, 'v')
+        .replace(/(\w)\1+/g, '$1'); // Remove repeated characters
+  }
+
+  // Then modify the _fuzzySearch method to use the simple phonetic algorithm
+  async _fuzzySearch(searchTerm) {
+    const searchPhonetic = this._simplePhonetic(searchTerm);
+    
+    const allGames = await this.preparedStatements.getAllGames.all();
+    
+    const matches = allGames
+        .map(game => ({
+            game,
+            phoneticScore: this._simplePhonetic(game.Name) === searchPhonetic ? 100 : 0,
+            levenScore: 100 - (this.levenshteinDistance(searchTerm, game.Name.toLowerCase()) * 10)
+        }))
+        .map(match => ({
+            ...match,
+            totalScore: (match.phoneticScore + match.levenScore) / 2
+        }))
+        .filter(match => match.totalScore > 50)
+        .sort((a, b) => b.totalScore - a.totalScore);
+
+    return matches.length > 0 ? matches[0].game.ID : null;
+  }
+
+  // Add new helper method for series matching
+  _calculateSeriesScore(searchTerm, fullGameName) {
+    const seriesPatterns = {
+        'dragon ball': ['dbz', 'dragon ball z', 'kakarot', 'sparking', 'sparking zero'],
+        'final fantasy': ['ff', 'ffvii', 'ff7'],
+        'grand theft auto': ['gta'],
+        // Add more series patterns as needed
+    };
+
+    const lowerFullName = fullGameName.toLowerCase();
+    const searchTermLower = searchTerm.toLowerCase();
+
+    for (const [series, patterns] of Object.entries(seriesPatterns)) {
+        if (lowerFullName.includes(series)) {
+            // Check if search term matches any pattern for this series
+            if (patterns.some(pattern => 
+                searchTermLower.includes(pattern) || 
+                pattern.includes(searchTermLower)
+            )) {
+                return 100;
+            }
+        }
+    }
+
+    return 0;
+  }
+
+  // Add this method to handle articles
+  _normalizeWithArticles(name) {
+    // List of articles to handle
+    const articles = ['the', 'a', 'an'];
+    const words = name.toLowerCase().split(' ');
+    
+    // Create variations with and without articles
+    let variations = [words.join(' ')];
+    
+    // If first word is an article, add version without it
+    if (articles.includes(words[0])) {
+        variations.push(words.slice(1).join(' '));
+    }
+    
+    // If it doesn't start with an article, add versions with articles
+    if (!articles.includes(words[0])) {
+        articles.forEach(article => {
+            variations.push(`${article} ${words.join(' ')}`);
+        });
+    }
+    
+    return variations;
+  }
+
+  // Add a method to handle special characters in game names
+  _normalizeGameName(name) {
+    return name.toLowerCase()
+        .replace(/[!?:]/g, '') // Remove special characters
+        .replace(/\s+/g, ' ')  // Normalize spaces
+        .trim();
   }
 }
 
