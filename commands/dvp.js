@@ -1047,15 +1047,20 @@ class DVP {
   async formatStreamStatus() {
     try {
       const status = await this.twitchEventManager.getUserStreamStatus('vulpeshd');
-      
-      // Just return the formula string, formatting will be handled separately
-      const titleText = "VulpesHD's Game Stats";
-      const statusText = status?.isLive ? 
-        "🟢 LIVE" : 
-        `🔴 Offline (Last live: ${status?.lastLive ? format(new Date(status.lastLive), 'MMMM d, yyyy') : 'Unknown'})`;
+      let statusText = '';
 
-      // Return just the formula string
-      return `=HYPERLINK("https://twitch.tv/vulpeshd", "${titleText}")&CHAR(10)&"${statusText}"`;
+      if (status?.isLive) {
+        // Get channel info for current game
+        const user = await this.apiClient.users.getUserByName('vulpeshd');
+        const channelInfo = await this.apiClient.channels.getChannelInfoById(user.id);
+        
+        statusText = `🟢 LIVE${channelInfo?.gameName ? ` • Playing ${channelInfo.gameName}` : ''}`;
+      } else {
+        statusText = `🔴 Offline (Last live: ${status?.lastLive ? format(new Date(status.lastLive), 'MMMM d, yyyy') : 'Unknown'})`;
+      }
+
+      // Return the formula string
+      return `=HYPERLINK("https://twitch.tv/vulpeshd", "VulpesHD's Game Stats")&CHAR(10)&"${statusText}"`;
     } catch (error) {
       logger.error(`Error formatting stream status: ${error}`);
       return '=HYPERLINK("https://twitch.tv/vulpeshd", "VulpesHD\'s Game Stats")';
