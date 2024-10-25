@@ -109,42 +109,9 @@ export async function setupCommands(bot) {
 
   // Setup Stats commands
   logger.debug('Setting up Stats commands...');
-  const statsCommands = setupStats(bot);
+  const statsCommands = await setupStats(bot);
   Object.entries(statsCommands).forEach(([name, handler]) => {
     registerCommand(name.toLowerCase(), handler, 'Stats');
-  });
-
-  // Add utility commands
-  logger.debug('Setting up utility commands...');
-  const utilityCommands = {
-    stats: async (context) => {
-      const { channel, user } = context;
-      try {
-        const uptime = process.uptime();
-        const memory = process.memoryUsage();
-        const response = `@${user.username} Bot Stats • Uptime: ${Math.floor(uptime/3600)}h ${Math.floor((uptime%3600)/60)}m • Memory: ${Math.round(memory.heapUsed/1024/1024)}MB`;
-        await context.say(response);
-      } catch (error) {
-        logger.error('Error in stats command:', error);
-        await context.say(`@${user.username}, Error getting stats.`);
-      }
-    },
-    ping: async (context) => {
-      const { channel, user } = context;
-      try {
-        const start = Date.now();
-        await bot.apiClient.users.getUserByName('twitch');
-        const ping = Date.now() - start;
-        await context.say(`@${user.username} Pong! Latency: ${ping}ms`);
-      } catch (error) {
-        logger.error('Error in ping command:', error);
-        await context.say(`@${user.username}, Error checking ping.`);
-      }
-    }
-  };
-
-  Object.entries(utilityCommands).forEach(([name, handler]) => {
-    registerCommand(name, handler, 'Utility');
   });
 
   logger.info('All commands registered successfully');

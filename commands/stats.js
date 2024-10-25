@@ -8,7 +8,7 @@ import TwitchEventManager from '../TwitchEventManager.js';
 class Stats {
   constructor(bot) {
     this.bot = bot;
-    this.startTime = Date.now();
+    this.startTime = new Date();
   }
 
   async getDirectorySize(directory) {
@@ -42,26 +42,26 @@ class Stats {
     const hours = Math.floor(minutes / 60);
     const days = Math.floor(hours / 24);
 
-    if (days > 0) {
-      return `${days}d, ${hours % 24}h, ${minutes % 60}m, ${seconds % 60}s`;
-    } else if (hours > 0) {
-      return `${hours}h, ${minutes % 60}m, ${seconds % 60}s`;
-    } else if (minutes > 0) {
-      return `${minutes}m, ${seconds % 60}s`;
-    } else {
-      return `${seconds}s`;
-    }
+    const parts = [];
+    
+    if (days > 0) parts.push(`${days}d`);
+    if (hours % 24 > 0) parts.push(`${hours % 24}h`);
+    if (minutes % 60 > 0) parts.push(`${minutes % 60}m`);
+    parts.push(`${seconds % 60}s`);
+
+    return parts.join(', ');
   }
 
   async handleStatsCommand(context) {
     const { channel, user } = context;
     try {
-      const uptime = this.formatUptime(Date.now() - this.startTime);
+      const uptime = this.formatUptime(Date.now() - this.startTime.getTime());
       const ping = await this.getPing();
+      const pingDisplay = ping >= 0 ? `${ping}ms` : 'unavailable';
       const memoryUsage = process.memoryUsage().heapUsed;
       const storageUsage = await this.getDirectorySize(process.cwd());
 
-      const response = `@${user.username} • Uptime: ${uptime} • Ping: ${ping}ms • Memory: ${this.formatBytes(memoryUsage)} • Database: ${this.formatBytes(storageUsage)}`;
+      const response = `@${user.username} • Uptime: ${uptime} • Ping: ${pingDisplay} • Memory: ${this.formatBytes(memoryUsage)} • Database: ${this.formatBytes(storageUsage)}`;
       await MessageLogger.logBotMessage(channel, response);
       await context.say(response);
     } catch (error) {
@@ -75,11 +75,14 @@ class Stats {
   async getPing() {
     try {
       const start = Date.now();
-      await this.bot.twitchService.getUser('twitch');
-      return Date.now() - start;
+      // Use the bot's apiClient instead of twitchService
+      await this.bot.apiClient.users.getUserById('12826');  // Twitch's ID
+      const ping = Date.now() - start;
+      return ping;
     } catch (error) {
       logger.error(`Error in getPing: ${error}`);
-      return 0;
+      // Return a high number to indicate error instead of 0
+      return -1;
     }
   }
 
@@ -87,7 +90,9 @@ class Stats {
     const { channel, user } = context;
     try {
       const ping = await this.getPing();
-      const response = `@${user.username}, Pong! Latency is ${ping}ms.`;
+      const response = ping >= 0 
+        ? `@${user.username}, Pong! Latency is ${ping}ms.`
+        : `@${user.username}, Failed to measure latency.`;
       await MessageLogger.logBotMessage(channel, response);
       await context.say(response);
     } catch (error) {
@@ -101,12 +106,14 @@ class Stats {
   async handleUptimeCommand(context) {
     const { channel, user } = context;
     try {
-      const uptime = this.formatUptime(Date.now() - this.startTime);
+      // Calculate uptime using the stored Date object
+      const uptimeMs = Date.now() - this.startTime.getTime();
+      const uptime = this.formatUptime(uptimeMs);
       const response = `@${user.username}, I've been running for ${uptime}.`;
       await MessageLogger.logBotMessage(channel, response);
       await context.say(response);
     } catch (error) {
-      logger.error(`Error in handleUptimeCommand: ${error}`);
+      logger.error(`Error in handleUptimeCommand: ${error.stack}`);
       const errorResponse = `@${user.username}, an error occurred while checking uptime.`;
       await MessageLogger.logBotMessage(channel, errorResponse);
       await context.say(errorResponse);
