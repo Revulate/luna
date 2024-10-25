@@ -1,5 +1,6 @@
 import logger from '../logger.js';
 import { config } from '../config.js';
+import MessageLogger from '../MessageLogger.js';
 
 class PreviewHandler {
   constructor(chatClient) {
@@ -60,7 +61,9 @@ class PreviewHandler {
     const { channel, user, args } = context;
     
     if (!args.length) {
-      await context.say(`@${user.username}, Please provide a channel name to preview.`);
+      const response = `@${user.username}, Please provide a channel name to preview.`;
+      await MessageLogger.logBotMessage(channel, response);
+      await context.say(response);
       return;
     }
 
@@ -73,13 +76,16 @@ class PreviewHandler {
         const info = await this.getChannelInfo(targetChannel);
         
         if (!info || !info.user) {
-          await context.say(`@${user.username}, Channel not found: ${targetChannel}`);
+          const response = `@${user.username}, Channel not found: ${targetChannel}`;
+          await MessageLogger.logBotMessage(channel, response);
+          await context.say(response);
           return;
         }
 
         const { user: channelUser, channel: channelInfo, stream, lastVideo } = info;
         const now = new Date();
 
+        let response;
         if (stream) {
           const duration = stream.startDate ? now - new Date(stream.startDate) : null;
           const status = duration ? `LIVE (${this.formatDuration(duration)})` : "LIVE";
@@ -88,14 +94,12 @@ class PreviewHandler {
             stream.thumbnailUrl.replace("{width}", "1280").replace("{height}", "720") : 
             "No thumbnail available";
 
-          const response = `@${user.username}, twitch.tv/${channelUser.name} | ` +
-                         `Status: ${status} | ` +
-                         `Viewers: ${viewers} | ` +
-                         `Category: ${channelInfo.gameName || "Unknown"} | ` +
-                         `Title: ${channelInfo.title || "No title"} | ` +
-                         `Preview: ${thumbnailUrl}`;
-
-          await context.say(response);
+          response = `@${user.username}, twitch.tv/${channelUser.name} | ` +
+                    `Status: ${status} | ` +
+                    `Viewers: ${viewers} | ` +
+                    `Category: ${channelInfo.gameName || "Unknown"} | ` +
+                    `Title: ${channelInfo.title || "No title"} | ` +
+                    `Preview: ${thumbnailUrl}`;
         } else {
           const status = "OFFLINE";
           let lastLive = "Unknown";
@@ -104,22 +108,23 @@ class PreviewHandler {
             lastLive = this.formatDuration(timeSinceLive);
           }
 
-          const response = `@${user.username}, twitch.tv/${channelUser.name} | ` +
-                         `Status: ${status} | ` +
-                         `Last Live: ${lastLive} ago | ` +
-                         `Category: ${channelInfo.gameName || "Unknown"} | ` +
-                         `Title: ${channelInfo.title || "No title"}`;
-
-          await context.say(response);
+          response = `@${user.username}, twitch.tv/${channelUser.name} | ` +
+                    `Status: ${status} | ` +
+                    `Last Live: ${lastLive} ago | ` +
+                    `Category: ${channelInfo.gameName || "Unknown"} | ` +
+                    `Title: ${channelInfo.title || "No title"}`;
         }
 
+        await MessageLogger.logBotMessage(channel, response);
+        await context.say(response);
         break; // Success, exit retry loop
+
       } catch (error) {
         logger.error(`Attempt ${attempt + 1} failed with error:`, error);
         if (attempt === retryCount - 1) {
-          await context.say(
-            `@${user.username}, Sorry, there was an error fetching channel information.`
-          );
+          const errorResponse = `@${user.username}, Sorry, there was an error fetching channel information.`;
+          await MessageLogger.logBotMessage(channel, errorResponse);
+          await context.say(errorResponse);
         } else {
           await new Promise(resolve => setTimeout(resolve, 2000)); // Wait before retry
         }

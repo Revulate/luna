@@ -81,6 +81,9 @@ class MessageLogger {
         // Check if it's a chat message by looking for the "Chat:" prefix
         if (message.startsWith('Chat:')) {
           coloredMessage = chalk.magentaBright(message);
+        } else if (message.startsWith('Bot Response:')) {
+          // Use hex color #FFA500 (orange) for bot responses
+          coloredMessage = chalk.hex('#FFA500')(message);
         } else {
           switch(level) {
             case 'error':
@@ -94,6 +97,9 @@ class MessageLogger {
               break;
             case 'debug':
               coloredMessage = chalk.blueBright(message);
+              break;
+            case 'bot':
+              coloredMessage = chalk.hex('#FFA500')(message); // Match the color above
               break;
             default:
               coloredMessage = message;
@@ -117,14 +123,16 @@ class MessageLogger {
           warn: 1,
           info: 2,
           debug: 3,
-          chat: 4
+          chat: 4,
+          bot: 5
         },
         colors: {
           error: 'redBright',
           warn: 'yellowBright',
           info: 'cyanBright',
           debug: 'blueBright',
-          chat: 'magentaBright'
+          chat: 'magentaBright',
+          bot: '#FFA500'  // Orange color for bot messages
         }
       };
 
@@ -178,7 +186,7 @@ class MessageLogger {
     this.listeners.forEach(callback => callback(messageData));
   }
 
-  async logMessage(channel, messageData, silent = false) {
+  async logMessage(channel, messageData, silent = false, isBot = false) {
     try {
       // Log to database
       await dbManager.run(`
@@ -190,14 +198,21 @@ class MessageLogger {
         messageData.username,
         messageData.userId,
         messageData.message,
-        messageData.timestamp,
+        messageData.timestamp || new Date().toISOString(),
         JSON.stringify(messageData.badges || {}),
         messageData.color || '#FFFFFF'
       ]);
 
       // Only log to console if not silent
       if (!silent) {
-        this.logger.info(`Chat: #${channel} @${messageData.username}: ${messageData.message}`);
+        const formattedChannel = channel.replace(/^#/, '');
+        if (isBot) {
+          // Log bot messages with both bot level and info level
+          this.logger.log('bot', `Bot: #${formattedChannel} @${messageData.username}: ${messageData.message}`);
+          this.logger.info(`Bot Response: #${formattedChannel} @${messageData.username}: ${messageData.message}`);
+        } else {
+          this.logger.info(`Chat: #${formattedChannel} @${messageData.username}: ${messageData.message}`);
+        }
       }
 
       // Update cache and notify listeners
@@ -400,6 +415,115 @@ class MessageLogger {
     } catch (error) {
       this.logger.error('Error getting database size:', error);
       return 0;
+    }
+  }
+
+  async getRecentMessages(channel, limit = 100) {
+    try {
+      const messages = await dbManager.all(`
+        SELECT 
+          channel,
+          username,
+          user_id as userId,
+          message,
+          timestamp,
+          badges,
+          color
+        FROM channel_messages
+        WHERE channel = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `, [channel.toLowerCase(), limit]);
+
+      return messages.map(msg => ({
+        ...msg,
+        badges: JSON.parse(msg.badges || '{}'),
+        timestamp: new Date(msg.timestamp).getTime()
+      }));
+    } catch (error) {
+      this.logger.error('Error fetching recent messages:', {
+        error: error.message,
+        channel
+      });
+      return [];
+    }
+  }
+
+  async getUserMessages(channel, username, limit = 1000) {
+    try {
+      return await dbManager.all(`
+        SELECT 
+          channel,
+          username,
+          user_id as userId,
+          message,
+          timestamp,
+          badges,
+          color
+        FROM channel_messages
+        WHERE channel = ? 
+        AND LOWER(username) = LOWER(?)
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `, [channel.toLowerCase(), username.toLowerCase(), limit]);
+    } catch (error) {
+      this.logger.error('Error fetching user messages:', {
+        error: error.message,
+        channel,
+        username
+      });
+      return [];
+    }
+  }
+
+  async logBotMessage(channel, message, botUsername = 'TatsLuna') {
+    const messageData = {
+      channel: channel.replace(/^#/, ''),
+      userId: '0', // Bot's user ID
+      username: botUsername,
+      message: message,
+      timestamp: new Date().toISOString(),
+      badges: {},
+      color: '#00FF00' // Bot's color
+    };
+
+    try {
+      // Add a small delay to ensure command is logged first
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      // Log to database
+      await dbManager.run(`
+        INSERT INTO channel_messages (
+          channel, username, user_id, message, timestamp, badges, color
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [
+        messageData.channel,
+        messageData.username,
+        messageData.userId,
+        messageData.message,
+        messageData.timestamp,
+        JSON.stringify(messageData.badges),
+        messageData.color
+      ]);
+
+      // Log to console with both bot and info levels
+      const formattedChannel = messageData.channel;
+      // Also log at info level to ensure visibility
+      this.logger.info(`Bot Response: #${formattedChannel} @${messageData.username}: ${messageData.message}`);
+
+      // Update cache and notify listeners
+      if (!this.messageCache.has(messageData.channel)) {
+        this.messageCache.set(messageData.channel, []);
+      }
+      const channelCache = this.messageCache.get(messageData.channel);
+      channelCache.push(messageData);
+      if (channelCache.length > 100) channelCache.shift();
+
+      this.notifyListeners(messageData);
+      return messageData;
+    } catch (error) {
+      this.logger.error('Error logging bot message:', error);
+      throw error;
     }
   }
 }

@@ -2,6 +2,7 @@ import os from 'os';
 import fs from 'fs/promises';
 import path from 'path';
 import logger from '../logger.js';
+import MessageLogger from '../MessageLogger.js';
 import TwitchEventManager from '../TwitchEventManager.js';
 
 class Stats {
@@ -52,18 +53,22 @@ class Stats {
     }
   }
 
-  async handleStatsCommand({ channel, user }) {
+  async handleStatsCommand(context) {
+    const { channel, user } = context;
     try {
       const uptime = this.formatUptime(Date.now() - this.startTime);
       const ping = await this.getPing();
       const memoryUsage = process.memoryUsage().heapUsed;
       const storageUsage = await this.getDirectorySize(process.cwd());
 
-      const response = `• Uptime: ${uptime} • Ping: ${ping}ms • Memory: ${this.formatBytes(memoryUsage)} • Database: ${this.formatBytes(storageUsage)}`;
-      await this.bot.say(channel, response);
+      const response = `@${user.username} • Uptime: ${uptime} • Ping: ${ping}ms • Memory: ${this.formatBytes(memoryUsage)} • Database: ${this.formatBytes(storageUsage)}`;
+      await MessageLogger.logBotMessage(channel, response);
+      await context.say(response);
     } catch (error) {
       logger.error(`Error in handleStatsCommand: ${error}`);
-      await this.bot.say(channel, `@${user.username}, an error occurred while fetching stats.`);
+      const errorResponse = `@${user.username}, an error occurred while fetching stats.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
     }
   }
 
@@ -78,24 +83,33 @@ class Stats {
     }
   }
 
-  async handlePingCommand({ channel, user }) {
+  async handlePingCommand(context) {
+    const { channel, user } = context;
     try {
       const ping = await this.getPing();
-      await this.bot.say(channel, `@${user.username}, Pong! Latency is ${ping}ms.`);
+      const response = `@${user.username}, Pong! Latency is ${ping}ms.`;
+      await MessageLogger.logBotMessage(channel, response);
+      await context.say(response);
     } catch (error) {
       logger.error(`Error in handlePingCommand: ${error}`);
-      await this.bot.say(channel, `@${user.username}, an error occurred while checking ping.`);
+      const errorResponse = `@${user.username}, an error occurred while checking ping.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
     }
   }
 
-  // New method for handling the uptime command
-  async handleUptimeCommand({ channel, user }) {
+  async handleUptimeCommand(context) {
+    const { channel, user } = context;
     try {
       const uptime = this.formatUptime(Date.now() - this.startTime);
-      await this.bot.say(channel, `@${user.username}, I've been running for ${uptime}.`);
+      const response = `@${user.username}, I've been running for ${uptime}.`;
+      await MessageLogger.logBotMessage(channel, response);
+      await context.say(response);
     } catch (error) {
       logger.error(`Error in handleUptimeCommand: ${error}`);
-      await this.bot.say(channel, `@${user.username}, an error occurred while checking uptime.`);
+      const errorResponse = `@${user.username}, an error occurred while checking uptime.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
     }
   }
 }
@@ -103,8 +117,8 @@ class Stats {
 export async function setupStats(bot) {
   const stats = new Stats(bot);
   return {
-    stats: (context) => stats.handleStatsCommand(context),
-    ping: (context) => stats.handlePingCommand(context),
-    uptime: (context) => stats.handleUptimeCommand(context),
+    stats: async (context) => await stats.handleStatsCommand(context),
+    ping: async (context) => await stats.handlePingCommand(context),
+    uptime: async (context) => await stats.handleUptimeCommand(context),
   };
 }

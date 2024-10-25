@@ -120,7 +120,13 @@ export default class TwitchEventManager extends EventEmitter {
             // Add required clients
             chatClient: this.chatClient,
             apiClient: this.apiClient,
-            say: async (text) => await this.chatClient.say(channel, text)
+            say: async (text) => {
+              // Log first, then send
+              if (this.messageLogger) {
+                await this.messageLogger.logBotMessage(channel, text);
+              }
+              await this.chatClient.say(channel, text);
+            }
           });
         }
 

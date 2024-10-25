@@ -1,6 +1,7 @@
+import MessageLogger from '../MessageLogger.js';
+import logger from '../logger.js';
 import { DataObject } from '@twurple/common';
 import { config } from '../config.js';
-import logger from '../logger.js';
 import { isMod, isVip } from '../index.js';
 import { ChatClient } from '@twurple/chat';
 
@@ -32,47 +33,53 @@ class Rate {
     });
   }
 
-  async handleCuteCommand({ channel, user, args, bot }) {
+  async handleCuteCommand({ channel, user, args }) {
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% cute. ${rateInfo.percentage >= 50 ? 'MenheraCute' : 'SadgeCry'}`;
-    await this.sendMessage(bot, channel, response);
+    await MessageLogger.logBotMessage(channel, response);
+    await context.say(response);
   }
 
-  async handleGayCommand({ channel, user, args, bot }) {
+  async handleGayCommand({ channel, user, args }) {
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% gay. ${rateInfo.percentage > 50 ? 'Gayge' : '📏'}`;
-    await this.sendMessage(bot, channel, response);
+    await MessageLogger.logBotMessage(channel, response);
+    await context.say(response);
   }
 
-  async handleStraightCommand({ channel, user, args, bot }) {
+  async handleStraightCommand({ channel, user, args }) {
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% straight. ${rateInfo.percentage > 50 ? '📏' : 'Hmm'}`;
-    await this.sendMessage(bot, channel, response);
+    await MessageLogger.logBotMessage(channel, response);
+    await context.say(response);
   }
 
-  async handleMydCommand({ channel, user, args, bot }) {
+  async handleMydCommand({ channel, user, args }) {
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const lengthCm = Math.floor(Math.random() * (20 - 7.5 + 1)) + 7.5;
     const girthCm = Math.floor(Math.random() * (15 - 7 + 1)) + 7;
     const response = `@${mentionedUser} 's pp is ${lengthCm} cm long and has a ${girthCm} cm girth. BillyApprove`;
-    await this.sendMessage(bot, channel, response);
+    await MessageLogger.logBotMessage(channel, response);
+    await context.say(response);
   }
 
-  async handleRateCommand({ channel, user, args, bot }) {
+  async handleRateCommand({ channel, user, args }) {
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(10, 5);
     const response = `I would give @${mentionedUser} a ${rateInfo.percentage}/10. ${rateInfo.percentage > 5 ? 'CHUG' : 'Hmm'}`;
-    await this.sendMessage(bot, channel, response);
+    await MessageLogger.logBotMessage(channel, response);
+    await context.say(response);
   }
 
-  async handleHornyCommand({ channel, user, args, bot }) {
+  async handleHornyCommand({ channel, user, args }) {
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% horny right now. ${rateInfo.percentage > 50 ? 'HORNY' : 'Hmm'}`;
-    await this.sendMessage(bot, channel, response);
+    await MessageLogger.logBotMessage(channel, response);
+    await context.say(response);
   }
 
   async handleIqCommand(context) {
@@ -85,14 +92,24 @@ class Rate {
     if (iq > 115) iqDescription = "catNerd";
     if (iq > 199) iqDescription = "BrainGalaxy";
     const response = `@${mentionedUser} has ${iq} IQ. ${iqDescription}`;
-    await context.say(response);
+    
+    try {
+      await MessageLogger.logBotMessage(channel, response);
+      await context.say(response);
+    } catch (error) {
+      logger.error(`Error in iq command: ${error}`);
+      const errorResponse = `@${user.username}, an error occurred.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
+    }
   }
 
-  async handleSusCommand({ channel, user, args, bot }) {
+  async handleSusCommand({ channel, user, args }) {
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% sus! ${rateInfo.percentage > 50 ? 'SUSSY' : 'Hmm'}`;
-    await this.sendMessage(bot, channel, response);
+    await MessageLogger.logBotMessage(channel, response);
+    await context.say(response);
   }
 
   async handleAllCommand(context) {
@@ -113,16 +130,16 @@ class Rate {
 
     try {
       for (const message of messages) {
+        await MessageLogger.logBotMessage(channel, message);
         await context.say(message);
         // Add a delay between messages
         await new Promise(resolve => setTimeout(resolve, 100));
       }
-      
-      logger.info(`Successfully sent all messages for #all command in ${channel}`);
-      messages.forEach(msg => logger.botMessage(`${channel}: ${msg}`));
     } catch (error) {
       logger.error(`Error in handleAllCommand: ${error.message}`);
-      await context.say(`@${user.username}, Sorry, an error occurred.`);
+      const errorResponse = `@${user.username}, Sorry, an error occurred.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
     }
   }
 

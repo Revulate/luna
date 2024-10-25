@@ -2,184 +2,135 @@ import MessageLogger from '../MessageLogger.js';
 import logger from '../logger.js';
 
 class MessageLookup {
-  constructor(bot) {
-    this.bot = bot;
-  }
-
-  async handleLastMessageCommand({ channel, user, args }) {
-    const channelName = channel.replace('#', '');
-    let targetUser = user.username;
-    let isSelfLookup = true;
-
-    if (args.length > 0) {
-      targetUser = args[0].replace('@', '');
-      isSelfLookup = targetUser.toLowerCase() === user.username.toLowerCase();
-    }
-
-    try {
-      const messagesWithContext = await MessageLogger.getMessagesWithContext(channelName, targetUser);
-      
-      if (messagesWithContext && messagesWithContext.length > 0) {
-        const lastMessage = messagesWithContext[0];
-        const date = new Date(lastMessage.timestamp);
-        const formattedDate = this.formatDate(date);
-        
-        let response;
-        if (isSelfLookup) {
-          response = `@${user.username}, this was your last message • ${lastMessage.message} • (${formattedDate})`;
-          if (lastMessage.previous_message) {
-            response += ` • Context: "${lastMessage.previous_message}" ➜ "${lastMessage.message}"`;
-          }
-        } else {
-          response = `@${user.username}, ${targetUser}'s last message was: ${lastMessage.message} • (${formattedDate})`;
-          if (lastMessage.previous_message) {
-            response += ` • Context: "${lastMessage.previous_message}" ➜ "${lastMessage.message}"`;
-          }
-        }
-        
-        await this.bot.say(channel, response);
-      } else {
-        const response = isSelfLookup
-          ? `@${user.username}, I couldn't find any messages from you in this channel.`
-          : `@${user.username}, I couldn't find any messages from ${targetUser} in this channel.`;
-        await this.bot.say(channel, response);
-      }
-    } catch (error) {
-      logger.error(`Error in handleLastMessageCommand: ${error.message}`, { error });
-      await this.bot.say(channel, `@${user.username}, Sorry, an error occurred while retrieving messages.`);
-    }
+  constructor(chatClient) {
+    this.chatClient = chatClient;
   }
 
   formatDate(date) {
     const now = new Date();
     const diffInSeconds = Math.floor((now - date) / 1000);
     
-    if (diffInSeconds < 60) return `${diffInSeconds} seconds ago`;
-    if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)} minutes ago`;
-    if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)} hours ago`;
-    if (diffInSeconds < 2592000) return `${Math.floor(diffInSeconds / 86400)} days ago`;
+    if (diffInSeconds < 60) return `${diffInSeconds}s ago`;
+    if (diffInSeconds < 3600) return `${Math.floor(diffInSeconds / 60)}m ago`;
+    if (diffInSeconds < 86400) return `${Math.floor(diffInSeconds / 3600)}h ago`;
+    if (diffInSeconds < 2592000) return `${Math.floor(diffInSeconds / 86400)}d ago`;
     
-    return date.toLocaleString();
+    return date.toLocaleString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      year: date.getFullYear() !== now.getFullYear() ? 'numeric' : undefined,
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true
+    });
   }
 
-  async handleRandomMessageCommand({ channel, user }) {
+  async handleCommand(command, context) {
+    const { channel, user, args } = context;
     const channelName = channel.replace('#', '');
-    const messages = MessageLogger.getRecentMessages(channelName, 1000); // Get last 1000 messages
-    const userMessages = messages.filter(msg => msg.username === user.username);
 
-    if (userMessages.length > 0) {
-      const randomMessage = userMessages[Math.floor(Math.random() * userMessages.length)];
-      const date = new Date(randomMessage.timestamp);
-      const formattedDate = this.formatDate(date);
-      await this.bot.say(channel, `@${user.username} • ${randomMessage.message} • (${formattedDate})`);
-    } else {
-      await this.bot.say(channel, `@${user.username}, I couldn't find any messages from you in this channel.`);
-    }
-  }
+    try {
+      switch (command) {
+        case 'lm':
+        case 'lastmessage': {
+          const targetUser = args[0]?.replace('@', '') || user.username;
+          const messages = await MessageLogger.getUserMessages(channelName, targetUser);
+          
+          if (messages.length === 0) {
+            const response = `@${user.username}, No messages found ${targetUser === user.username ? '' : `for ${targetUser}`}.`;
+            await MessageLogger.logBotMessage(channel, response);
+            await context.say(response);
+            return;
+          }
 
-  async handleWordCountCommand({ channel, user, args }) {
-    if (args.length === 0) {
-      await this.bot.say(channel, `@${user.username}, please provide a word or phrase to search for.`);
-      return;
-    }
-
-    const searchTerm = args.join(' ').toLowerCase();
-    const channelName = channel.replace('#', '');
-    const messages = MessageLogger.getRecentMessages(channelName, 10000); // Get last 10000 messages
-    const userMessages = messages.filter(msg => msg.username === user.username);
-
-    const count = userMessages.reduce((acc, msg) => {
-      return acc + (msg.message.toLowerCase().split(searchTerm).length - 1);
-    }, 0);
-
-    await this.bot.say(channel, `@${user.username}, you've used "${searchTerm}" ${count} times in your recent messages.`);
-  }
-
-  async handleCommand(context) {
-    const { channel, user, message, args } = context;
-    
-    // Get the command from the first argument
-    const command = args[0].toLowerCase();
-    // Get the remaining args
-    const commandArgs = args.slice(1);
-
-    switch (command) {
-      case '#lastmessage':
-      case '#lm':
-        await this.handleLastMessageCommand({ channel, user, args: commandArgs });
-        break;
-      case '#randommessage':
-      case '#rm':
-        if (commandArgs.length > 0) {
-          await this.bot.say(channel, `@${user.username} sorry, but to respect their privacy I won't do that.`);
-        } else {
-          await this.handleRandomMessageCommand({ channel, user });
+          const [last, ...older] = messages;
+          const olderMsg = older.find(msg => Date.now() - new Date(msg.timestamp) > 300000); // 5 minutes
+          
+          let response = `@${user.username}, ${targetUser === user.username ? 'Your' : `${targetUser}'s`} last message: ${last.message} (${this.formatDate(new Date(last.timestamp))})`;
+          if (olderMsg) {
+            response += ` • Previous: ${olderMsg.message} (${this.formatDate(new Date(olderMsg.timestamp))})`;
+          }
+          
+          await MessageLogger.logBotMessage(channel, response);
+          await context.say(response);
+          break;
         }
-        break;
-      case '#wordcount':
-      case '#wc':
-        await this.handleWordCountCommand({ channel, user, args: commandArgs });
-        break;
-      default:
-        logger.warn(`Unknown command: ${command}`);
+
+        case 'rm':
+        case 'randommessage': {
+          const messages = await MessageLogger.getUserMessages(channelName, user.username, 10000);
+          if (messages.length === 0) {
+            const response = `@${user.username}, No messages found.`;
+            await MessageLogger.logBotMessage(channel, response);
+            await context.say(response);
+            return;
+          }
+
+          const random = messages[Math.floor(Math.random() * messages.length)];
+          const date = new Date(random.timestamp);
+          const response = `@${user.username} • Random message from ${this.formatDate(date)} • ${random.message}`;
+          await MessageLogger.logBotMessage(channel, response);
+          await context.say(response);
+          break;
+        }
+
+        case 'wc':
+        case 'count': {
+          if (!args.length) {
+            const response = `@${user.username}, Please provide a word to count.`;
+            await MessageLogger.logBotMessage(channel, response);
+            await context.say(response);
+            return;
+          }
+
+          const word = args.join(' ').toLowerCase();
+          const messages = await MessageLogger.getUserMessages(channelName, user.username, 50000);
+          
+          const matches = messages.filter(msg => 
+            msg.message.toLowerCase().includes(word)
+          );
+
+          if (matches.length === 0) {
+            const response = `@${user.username}, You haven't used "${word}" in your messages.`;
+            await MessageLogger.logBotMessage(channel, response);
+            await context.say(response);
+            return;
+          }
+
+          const count = matches.reduce((acc, msg) => {
+            const regex = new RegExp(word, 'gi');
+            return acc + (msg.message.match(regex) || []).length;
+          }, 0);
+
+          const first = new Date(Math.min(...matches.map(m => m.timestamp)));
+          const last = new Date(Math.max(...matches.map(m => m.timestamp)));
+
+          const response = `@${user.username}, You've used "${word}" ${count} time${count === 1 ? '' : 's'} ` +
+            `• First: ${this.formatDate(first)} • Last: ${this.formatDate(last)}`;
+          
+          await MessageLogger.logBotMessage(channel, response);
+          await context.say(response);
+          break;
+        }
+      }
+    } catch (error) {
+      logger.error(`Error in ${command} command:`, error);
+      const errorResponse = `@${user.username}, An error occurred while processing your request.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
     }
   }
 }
 
-export function setupMessageLookup(bot) {
+export function setupMessageLookup(chatClient) {
+  const handler = new MessageLookup(chatClient);
+  
   return {
-    lm: async (context) => {
-      try {
-        const messages = await MessageLogger.getRecentMessages(context.channel.replace('#', ''), 100);
-        if (!messages || messages.length === 0) {
-          await context.bot.say(context.channel, `@${context.user.username}, No messages found.`);
-          return;
-        }
-
-        const userMessages = messages.filter(msg => 
-          msg.username.toLowerCase() === context.user.username.toLowerCase()
-        );
-
-        if (userMessages.length > 1) {
-          const lastMessage = userMessages[1];
-          await context.bot.say(context.channel, 
-            `@${context.user.username} Your last message was: ${lastMessage.message}`
-          );
-        } else {
-          await context.bot.say(context.channel, 
-            `@${context.user.username} No previous messages found.`);
-        }
-      } catch (error) {
-        logger.error(`Error in lm command: ${error.message}`, { error });
-        await context.bot.say(context.channel, 
-          `@${context.user.username}, Sorry, an error occurred.`);
-      }
-    },
-    rm: async (context) => {
-      try {
-        const messages = await MessageLogger.getRecentMessages(context.channel.replace('#', ''), 100);
-        if (!messages || messages.length === 0) {
-          await context.bot.say(context.channel, `@${context.user.username}, No messages found.`);
-          return;
-        }
-
-        // Get random message excluding the current command
-        const filteredMessages = messages.filter(msg => 
-          msg.username.toLowerCase() !== context.user.username.toLowerCase() &&
-          !msg.message.startsWith('#')
-        );
-        
-        if (filteredMessages.length === 0) {
-          await context.bot.say(context.channel, `@${context.user.username}, No valid messages found.`);
-          return;
-        }
-
-        const randomMessage = filteredMessages[Math.floor(Math.random() * filteredMessages.length)];
-        await context.bot.say(context.channel, `@${context.user.username} Random message from ${randomMessage.username}: ${randomMessage.message}`);
-      } catch (error) {
-        logger.error(`Error in rm command: ${error.message}`, { error });
-        await context.bot.say(context.channel, `@${context.user.username}, Sorry, an error occurred while processing your request.`);
-      }
-    }
+    'lm': async (context) => await handler.handleCommand('lm', context),
+    'lastmessage': async (context) => await handler.handleCommand('lastmessage', context),
+    'rm': async (context) => await handler.handleCommand('rm', context),
+    'randommessage': async (context) => await handler.handleCommand('randommessage', context),
+    'wc': async (context) => await handler.handleCommand('wc', context),
+    'count': async (context) => await handler.handleCommand('count', context)
   };
 }
