@@ -1,8 +1,6 @@
 import { ApiClient } from '@twurple/api';
-import { EventSubWsListener } from '@twurple/eventsub-ws';
-import logger from './logger.js';
 import { EventEmitter } from 'events';
-// Add this import
+import logger from './logger.js';
 import { config } from './config.js';
 
 export default class TwitchEventManager extends EventEmitter {
@@ -31,6 +29,69 @@ export default class TwitchEventManager extends EventEmitter {
     
     this.messageLogger = null;
     logger.info(`TwitchEventManager initialized with channels: ${Array.from(this.channels).join(', ')}`);
+  }
+
+  async getGameImageUrl(gameName) {
+    try {
+      const game = await this.apiClient.games.getGameByName(gameName);
+      if (game) {
+        const boxArtUrl = game.boxArtUrl.replace('{width}', '285').replace('{height}', '380');
+        logger.info(`Generated image URL for '${gameName}': ${boxArtUrl}`);
+        return boxArtUrl;
+      }
+      logger.warn(`No image found for game: ${gameName}`);
+      return null;
+    } catch (error) {
+      logger.error(`Error fetching game image URL for ${gameName}:`, error);
+      return null;
+    }
+  }
+
+  async getUserProfilePicture(username) {
+    try {
+      const user = await this.apiClient.users.getUserByName(username);
+      if (user) {
+        logger.info(`Fetched profile picture URL for '${username}': ${user.profilePictureUrl}`);
+        return user.profilePictureUrl;
+      }
+      logger.warn(`No profile picture found for user: ${username}`);
+      return null;
+    } catch (error) {
+      logger.error(`Error fetching profile picture for ${username}:`, error);
+      return null;
+    }
+  }
+
+  async getUserStreamStatus(username) {
+    try {
+      const user = await this.apiClient.users.getUserByName(username);
+      if (!user) {
+        return null;
+      }
+
+      const stream = await this.apiClient.streams.getStreamByUserId(user.id);
+      if (stream) {
+        return {
+          isLive: true,
+          startedAt: stream.startDate
+        };
+      } else {
+        // Get last stream info
+        const videos = await this.apiClient.videos.getVideosByUser(user.id, {
+          type: 'archive',
+          limit: 1
+        });
+        
+        const lastStream = videos.data[0];
+        return {
+          isLive: false,
+          lastLive: lastStream ? lastStream.creationDate : null
+        };
+      }
+    } catch (error) {
+      logger.error(`Error fetching stream status for ${username}:`, error);
+      return null;
+    }
   }
 
   setupEventHandlers() {

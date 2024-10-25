@@ -2,7 +2,7 @@ import os from 'os';
 import fs from 'fs/promises';
 import path from 'path';
 import logger from '../logger.js';
-import TwitchAPI from '../twitch_api.js';
+import TwitchEventManager from '../TwitchEventManager.js';
 
 class Stats {
   constructor(bot) {

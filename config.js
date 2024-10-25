@@ -17,10 +17,7 @@ function parseCSV(str, defaultValue = []) {
     return str ? str.split(',').map(s => s.trim()).filter(Boolean) : defaultValue;
 }
 
-// Add debug logging for channel parsing
 export function parseChannels(channelString) {
-  logger.debug(`Parsing channel string: ${channelString}`);
-  
   if (!channelString) {
     logger.warn('No channels provided in environment variables');
     return [];
@@ -28,13 +25,8 @@ export function parseChannels(channelString) {
 
   const channels = channelString.split(',')
     .map(channel => channel.trim())
-    .filter(channel => {
-      const isValid = channel.length > 0;
-      if (!isValid) logger.debug(`Filtered out empty channel`);
-      return isValid;
-    });
+    .filter(channel => channel.length > 0);
 
-  logger.debug(`Parsed channels: ${JSON.stringify(channels)}`);
   return channels;
 }
 
@@ -61,7 +53,7 @@ export const config = {
         }
     },
     logging: {
-        level: process.env.LOG_LEVEL || 'debug',
+        level: process.env.LOG_LEVEL || 'info', // Use the log level from .env
         twurpleLevel: process.env.LOGGING || 'twurple=info;twurple:api:rate-limiter=warning'
     },
     youtube: {
@@ -83,7 +75,7 @@ export const config = {
     google: {
         sheetId: requireEnv('GOOGLE_SHEET_ID'),
         credentialsFile: requireEnv('GOOGLE_CREDENTIALS_FILE'),
-        sheetUrl: process.env.GOOGLE_SHEET_URL
+        scriptId: requireEnv('GOOGLE_SCRIPT_ID')
     },
     cache: {
         defaultTTL: parseInt(process.env.CACHE_TTL) || 300, // 5 minutes
@@ -98,28 +90,3 @@ export const config = {
         password: process.env.WEB_PANEL_PASSWORD || 'changeme' // Make sure to set this in .env
     }
 };
-
-// Validate configuration
-function validateConfig() {
-    if (!config.twitch.channels.length) {
-        throw new Error('No Twitch channels configured');
-    }
-    
-    // Add more validation as needed
-}
-
-try {
-    validateConfig();
-    
-    // Debug the final config
-    logger.debug(`Loaded config: ${JSON.stringify({
-      ...config,
-      twitch: {
-        ...config.twitch,
-        clientSecret: '[REDACTED]'
-      }
-    }, null, 2)}`);
-} catch (error) {
-    logger.error('Configuration error:', error);
-    process.exit(1);
-}

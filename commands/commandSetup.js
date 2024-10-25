@@ -5,6 +5,10 @@ import { setupAfk } from './afk.js';
 import { setupGpt } from './gpt.js';
 import MessageLogger from '../MessageLogger.js';
 import { setup7tv } from './7tv.js';
+import { setupMessageLookup } from './messageLookup.js';
+import { setupSpc } from './spc.js';
+import { setupDvp } from './dvp.js';
+import { setupStats } from './stats.js';
 
 export async function setupCommands(chatClient) {
   logger.info('Starting setupCommands function');
@@ -80,6 +84,36 @@ export async function setupCommands(chatClient) {
     const commandName = name.toLowerCase();
     logger.debug(`Registering 7TV command: ${commandName}`);
     registerCommand(commandName, handler, '7TV');
+  });
+
+  // Setup message lookup commands
+  logger.debug('Setting up message lookup commands...');
+  const messageLookupCommands = setupMessageLookup(chatClient);
+  Object.entries(messageLookupCommands).forEach(([name, handler]) => {
+    registerCommand(name.toLowerCase(), handler, 'MessageLookup');
+  });
+
+  // Setup SPC commands
+  logger.debug('Setting up SPC commands...');
+  const spcCommands = setupSpc(chatClient);
+  Object.entries(spcCommands).forEach(([name, handler]) => {
+    registerCommand(name.toLowerCase(), handler, 'SPC');
+  });
+
+  // Setup DVP commands
+  logger.debug('Setting up DVP commands...');
+  const dvpCommands = await setupDvp(chatClient);
+  Object.entries(dvpCommands).forEach(([name, handler]) => {
+    const commandName = name.toLowerCase();
+    logger.debug(`Registering DVP command: ${commandName}`);
+    registerCommand(commandName, handler, 'DVP');
+  });
+
+  // Setup Stats commands
+  logger.debug('Setting up Stats commands...');
+  const statsCommands = setupStats(chatClient);
+  Object.entries(statsCommands).forEach(([name, handler]) => {
+    registerCommand(name.toLowerCase(), handler, 'Stats');
   });
 
   // Add utility commands

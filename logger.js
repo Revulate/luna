@@ -2,7 +2,7 @@ import { createLogger, format, transports } from 'winston';
 import path from 'path';
 
 const logger = createLogger({
-  level: 'debug', // Ensure this is set to 'debug' to capture all logs
+  level: process.env.LOG_LEVEL || 'info', // Use the log level from .env
   format: format.combine(
     format.timestamp(),
     format.printf(({ timestamp, level, message, ...meta }) => {
@@ -13,7 +13,7 @@ const logger = createLogger({
   ),
   transports: [
     new transports.Console(),
-    new transports.File({ filename: path.join('logs', 'app.log'), level: 'debug' }) // Ensure file path is correct
+    new transports.File({ filename: path.join('logs', 'app.log'), level: process.env.LOG_LEVEL || 'info' }) // Ensure file path is correct
   ]
 });
 

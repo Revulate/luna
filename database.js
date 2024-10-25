@@ -16,7 +16,7 @@ class DatabaseManager {
       
       const dbPath = path.join(dbDir, 'bot.db');
       this.db = new Database(dbPath, {
-        verbose: logger.debug,
+        verbose: logger.debug.bind(logger),
         fileMustExist: false,
         timeout: 5000,
         readonly: false,

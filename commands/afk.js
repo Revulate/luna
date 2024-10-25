@@ -93,7 +93,15 @@ class AFK {
       return;
     }
 
-    const userId = context.user.id.toString();
+    // Ensure user ID is available
+    const userId = context.user?.userId || context.rawMessage?.userInfo?.userId;
+    if (!userId) {
+      logger.error('No user ID found in context:', { user: context.user });
+      await this.chatClient.say(context.channel, 
+        `@${context.user.username}, an error occurred: User ID is missing.`);
+      return;
+    }
+
     const cleanChannel = context.channel.replace('#', '');
     const cutoffTime = Math.floor(Date.now() / 1000) - (30 * 60); // 30 minutes ago
 

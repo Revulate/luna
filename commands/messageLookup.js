@@ -45,7 +45,7 @@ class MessageLookup {
         await this.bot.say(channel, response);
       }
     } catch (error) {
-      logger.error(`Error in handleLastMessageCommand: ${error}`);
+      logger.error(`Error in handleLastMessageCommand: ${error.message}`, { error });
       await this.bot.say(channel, `@${user.username}, Sorry, an error occurred while retrieving messages.`);
     }
   }
@@ -150,7 +150,7 @@ export function setupMessageLookup(bot) {
             `@${context.user.username} No previous messages found.`);
         }
       } catch (error) {
-        logger.error(`Error in lm command: ${error}`);
+        logger.error(`Error in lm command: ${error.message}`, { error });
         await context.bot.say(context.channel, 
           `@${context.user.username}, Sorry, an error occurred.`);
       }
@@ -177,7 +177,7 @@ export function setupMessageLookup(bot) {
         const randomMessage = filteredMessages[Math.floor(Math.random() * filteredMessages.length)];
         await context.bot.say(context.channel, `@${context.user.username} Random message from ${randomMessage.username}: ${randomMessage.message}`);
       } catch (error) {
-        logger.error(`Error in rm command: ${error}`);
+        logger.error(`Error in rm command: ${error.message}`, { error });
         await context.bot.say(context.channel, `@${context.user.username}, Sorry, an error occurred while processing your request.`);
       }
     }
