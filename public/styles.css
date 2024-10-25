@@ -332,26 +332,59 @@ body {
   font-size: 0.9em;
   display: flex;
   gap: 8px;
+  align-items: baseline;
 }
 
 .log-timestamp {
   color: var(--text-muted);
   white-space: nowrap;
+  font-size: 0.9em;
 }
 
 .log-level {
   font-weight: 500;
   white-space: nowrap;
+  min-width: 60px;
+  text-align: center;
 }
 
 .log-message {
   word-break: break-word;
+  flex: 1;
 }
 
-.log-error { color: var(--error-color); }
-.log-warn { color: var(--warning-color); }
-.log-info { color: var(--info-color); }
-.log-debug { color: var(--text-muted); }
+.log-metadata {
+  color: var(--text-muted);
+  font-size: 0.8em;
+  font-style: italic;
+  margin-left: 8px;
+}
+
+/* Update log level colors to match logger.js */
+.log-entry.log-error { 
+  color: var(--error-color);
+  background: rgba(244, 67, 54, 0.1);
+}
+
+.log-entry.log-warn { 
+  color: var(--warning-color);
+  background: rgba(255, 152, 0, 0.1);
+}
+
+.log-entry.log-info { 
+  color: var(--info-color);
+  background: rgba(33, 150, 243, 0.1);
+}
+
+.log-entry.log-debug { 
+  color: var(--text-muted);
+  background: rgba(158, 158, 158, 0.1);
+}
+
+.log-entry.log-chat {
+  color: var(--primary-color);
+  background: rgba(100, 65, 165, 0.1);
+}
 
 /* Commands Container */
 .commands-container {

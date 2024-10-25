@@ -84,26 +84,6 @@ export class WebPanel {
           }
         });
 
-        // Update chat message event handler
-        this.eventManager.on('chatMessage', (messageData) => {
-          // Format timestamp in ISO format
-          const formattedMessage = {
-            ...messageData,
-            timestamp: new Date(messageData.timestamp || Date.now()).toISOString()
-          };
-          
-          // Emit chat message once
-          this.io.emit('chatMessage', formattedMessage);
-          
-          // Log message once
-          const logEntry = {
-            timestamp: formattedMessage.timestamp,
-            level: 'INFO',
-            message: `${messageData.channel}: <${messageData.username}> ${messageData.message}`
-          };
-          this.io.emit('newLog', logEntry);
-        });
-
         // Handle bot messages
         socket.on('sendMessage', async (data) => {
           try {
@@ -138,17 +118,10 @@ export class WebPanel {
           logger.info('Client disconnected');
         });
 
-        // Add enhanced logging
-        this.messageLogger.addListener((logEntry) => {
-          const formattedLog = {
-            timestamp: new Date().toISOString(),
-            level: logEntry.level || 'INFO',
-            message: typeof logEntry === 'string' ? logEntry : logEntry.message,
-            metadata: logEntry.metadata || {}
-          };
-
-          socket.emit('newLog', formattedLog);
-          logger.debug('Emitted log:', formattedLog);
+        // Update error logging
+        socket.on('error', (error) => {
+          logger.error('Socket error:', error);
+          socket.emit('error', 'An error occurred');
         });
 
       } catch (error) {
@@ -157,19 +130,24 @@ export class WebPanel {
       }
     });
 
-    // Listen for TwitchEventManager channel events
+    // SINGLE event listener for chat messages
+    this.eventManager.on('chatMessage', (messageData) => {
+      const formattedMessage = {
+        ...messageData,
+        timestamp: new Date(messageData.timestamp || Date.now()).toISOString()
+      };
+      
+      // Only emit to socket.io clients, don't log here since MessageLogger will handle that
+      this.io.emit('chatMessage', formattedMessage);
+      
+      // Log to database only, without additional console logging
+      this.messageLogger.logMessage(messageData.channel, formattedMessage, true); // Add silent parameter
+    });
+
+    // SINGLE event listener for channel joins
     this.eventManager.on('channelJoined', (channel) => {
       logger.debug(`Broadcasting channelJoined event for: ${channel}`);
       this.io.emit('channelJoined', channel);
-    });
-
-    // Add listener for new log entries
-    this.messageLogger.addListener((logEntry) => {
-      this.io.emit('newLog', {
-        timestamp: new Date().toISOString(),
-        level: logEntry.level,
-        message: logEntry.message
-      });
     });
   }
 

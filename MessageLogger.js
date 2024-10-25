@@ -78,8 +78,9 @@ class MessageLogger {
         const levelIndicator = chalk.white(`[${level.toUpperCase()}]`);
         
         let coloredMessage;
-        if (channel && username) {
-          coloredMessage = chalk.magentaBright(`Chat: #${channel} @${username}: ${content}`);
+        // Check if it's a chat message by looking for the "Chat:" prefix
+        if (message.startsWith('Chat:')) {
+          coloredMessage = chalk.magentaBright(message);
         } else {
           switch(level) {
             case 'error':
@@ -177,61 +178,40 @@ class MessageLogger {
     this.listeners.forEach(callback => callback(messageData));
   }
 
-  async logMessage(channel, messageData) {
+  async logMessage(channel, messageData, silent = false) {
     try {
-      // Log chat message at INFO level
-      this.logger.info('', {
-        channel: channel.replace('#', ''),
-        username: messageData.username,
-        content: messageData.message
-      });
-
-      // Perform database operations silently unless in debug mode
-      await dbManager.run(`
-        INSERT OR IGNORE INTO channels (channel_name)
-        VALUES (?)
-      `, [channel.toLowerCase()]);
-
-      const formattedMessage = {
-        channel: channel.toLowerCase(),
-        username: messageData.username,
-        user_id: messageData.userId,
-        message: messageData.message,
-        timestamp: new Date().toISOString(),
-        badges: JSON.stringify(messageData.badges || {}),
-        color: messageData.color || '#FFFFFF'
-      };
-
+      // Log to database
       await dbManager.run(`
         INSERT INTO channel_messages (
           channel, username, user_id, message, timestamp, badges, color
         ) VALUES (?, ?, ?, ?, ?, ?, ?)
       `, [
-        formattedMessage.channel,
-        formattedMessage.username,
-        formattedMessage.user_id,
-        formattedMessage.message,
-        formattedMessage.timestamp,
-        formattedMessage.badges,
-        formattedMessage.color
+        channel.toLowerCase(),
+        messageData.username,
+        messageData.userId,
+        messageData.message,
+        messageData.timestamp,
+        JSON.stringify(messageData.badges || {}),
+        messageData.color || '#FFFFFF'
       ]);
+
+      // Only log to console if not silent
+      if (!silent) {
+        this.logger.info(`Chat: #${channel} @${messageData.username}: ${messageData.message}`);
+      }
 
       // Update cache and notify listeners
       if (!this.messageCache.has(channel)) {
         this.messageCache.set(channel, []);
       }
       const channelCache = this.messageCache.get(channel);
-      channelCache.push(formattedMessage);
+      channelCache.push(messageData);
       if (channelCache.length > 100) channelCache.shift();
 
-      this.notifyListeners(formattedMessage);
+      this.notifyListeners(messageData);
 
     } catch (error) {
-      this.logger.error('Error logging message:', {
-        error: error.message,
-        channel,
-        messageData
-      });
+      this.logger.error('Error logging message:', error);
     }
   }
 

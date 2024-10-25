@@ -231,7 +231,7 @@ function initializeSocket() {
   socket.emit('requestStats');
 }
 
-// Add log handling function
+// Update log entry formatting
 function addLogEntry(log) {
   const logsBox = document.getElementById('logsBox');
   if (!logsBox) return;
@@ -239,15 +239,41 @@ function addLogEntry(log) {
   const logEntry = document.createElement('div');
   logEntry.className = `log-entry log-${log.level?.toLowerCase() || 'info'}`;
   
-  const timestamp = new Date(log.timestamp || Date.now()).toLocaleTimeString();
+  // Use the enhanced timestamp formatting
+  const timeString = formatTimestamp(log.timestamp);
+  
+  // Add metadata if present
+  const metadataHtml = log.metadata && Object.keys(log.metadata).length 
+    ? `<span class="log-metadata">${JSON.stringify(log.metadata)}</span>` 
+    : '';
+  
   logEntry.innerHTML = `
-    <span class="log-timestamp">${timestamp}</span>
+    <span class="log-timestamp">${timeString}</span>
     <span class="log-level">[${(log.level || 'INFO').toUpperCase()}]</span>
     <span class="log-message">${log.message || ''}</span>
+    ${metadataHtml}
   `;
   
   logsBox.appendChild(logEntry);
   logsBox.scrollTop = logsBox.scrollHeight;
+}
+
+// Update timestamp formatting to match logger
+function formatTimestamp(timestamp) {
+  try {
+    const date = new Date(timestamp);
+    if (isNaN(date.getTime())) throw new Error('Invalid date');
+    
+    return date.toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    });
+  } catch (error) {
+    console.error('Error formatting timestamp:', error);
+    return new Date().toLocaleTimeString();
+  }
 }
 
 // Add log filtering functionality

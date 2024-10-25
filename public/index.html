@@ -115,10 +115,16 @@
                         <option value="warn">Warnings</option>
                         <option value="info">Info</option>
                         <option value="debug">Debug</option>
+                        <option value="chat">Chat</option>
                     </select>
-                    <button id="clearLogs" class="clear-button">
-                        <i class="fas fa-trash"></i> Clear
-                    </button>
+                    <div class="logs-actions">
+                        <button id="clearLogs" class="clear-button">
+                            <i class="fas fa-trash"></i> Clear
+                        </button>
+                        <button id="exportLogs" class="export-button">
+                            <i class="fas fa-download"></i> Export
+                        </button>
+                    </div>
                 </div>
                 <div class="logs-box" id="logsBox"></div>
             </div>
