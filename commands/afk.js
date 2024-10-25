@@ -11,13 +11,28 @@ class AFK {
     this.initialized = false;
     this.currentlyAfkUsers = new Map();
     this.reasonEmojis = {
-      afk: '🌙',
-      sleep: '💤',
-      gn: '💤',
-      work: '💼',
-      food: '🍽️',
-      gaming: '🎮',
-      bed: '🛏️'
+      afk: '•',
+      sleep: '•',
+      gn: '•',
+      work: '•',
+      food: '•',
+      gaming: '•',
+      bed: '•',
+      eating: '•',
+      working: '•',
+      bedge: '•'
+    };
+    this.statusMessages = {
+      afk: 'AFK',
+      sleep: 'sleeping',
+      gn: 'sleeping',
+      work: 'working',
+      food: 'eating',
+      gaming: 'gaming',
+      bed: 'sleeping',
+      eating: 'eating',
+      working: 'working',
+      bedge: 'sleeping'
     };
   }
 
@@ -51,10 +66,10 @@ class AFK {
         return;
       }
 
-      const emoji = this.reasonEmojis[command] || this.reasonEmojis.afk;
-      const baseReason = command === 'afk' ? 'AFK' : command.toUpperCase();
+      const emoji = this.reasonEmojis[command];
+      const baseReason = this.statusMessages[command] || 'AFK';
       const reason = args.length > 0 ? args.join(' ') : '';
-      const fullReason = reason ? `${baseReason} ${emoji}: ${reason}` : `${baseReason} ${emoji}`;
+      const fullReason = reason ? `${baseReason} ${emoji} ${reason}` : baseReason;
       const timestamp = Math.floor(Date.now() / 1000);
 
       // Begin transaction
@@ -295,10 +310,14 @@ class AFK {
         const userKey = this.getUserKey(userId, cleanChannel);
         this.currentlyAfkUsers.delete(userKey);
 
-        // Send return message - remove the duplicate AFK message
-        await this.chatClient.say(channel,
-          `@${user} is no longer ${activeAfk.reason} (was away for ${duration})`
-        );
+        // Extract base status from the stored reason
+        const storedReason = activeAfk.reason;
+        const hasCustomReason = storedReason.includes('•');
+        const returnMessage = hasCustomReason 
+          ? `@${user} is no longer ${storedReason} (was away for ${duration})`
+          : `@${user} is no longer ${storedReason} (was away for ${duration})`;
+
+        await this.chatClient.say(channel, returnMessage);
       }
     } catch (error) {
       logger.error(`Error handling message for AFK: ${error}`);
@@ -340,9 +359,12 @@ export async function setupAfk(chatClient) {
         sleep: async (context) => await afk.handleAfkCommand({ ...context, command: 'sleep' }),
         gn: async (context) => await afk.handleAfkCommand({ ...context, command: 'gn' }),
         work: async (context) => await afk.handleAfkCommand({ ...context, command: 'work' }),
+        working: async (context) => await afk.handleAfkCommand({ ...context, command: 'working' }),
         food: async (context) => await afk.handleAfkCommand({ ...context, command: 'food' }),
+        eating: async (context) => await afk.handleAfkCommand({ ...context, command: 'eating' }),
         gaming: async (context) => await afk.handleAfkCommand({ ...context, command: 'gaming' }),
         bed: async (context) => await afk.handleAfkCommand({ ...context, command: 'bed' }),
+        bedge: async (context) => await afk.handleAfkCommand({ ...context, command: 'bedge' }),
         rafk: async (context) => await afk.handleRafkCommand(context),
         clearafk: async (context) => await afk.clearAfkStatus(context.user.id, context.channel)
       }
