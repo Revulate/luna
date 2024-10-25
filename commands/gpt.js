@@ -463,47 +463,69 @@ class GptHandler {
     return this.responseCache.get(cacheKey);
   }
 
-  async handleGptCommand(channel, user, args, message) {
+  async handleGptCommand(context) {
+    const { channel, user, args } = context;
     try {
       const prompt = args.join(' ');
       
+      // Check cache first, but don't log anything yet
+      const cachedResponse = this.getFromCache(user.userId, prompt);
+      if (cachedResponse) {
+        // Wait a tick to ensure chat message is logged first
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const response = `@${user.username} ${cachedResponse}`;
+        await MessageLogger.logBotMessage(channel, response);
+        await context.say(response);
+        return;
+      }
+
+      // Wait a tick to ensure chat message is logged first
+      await new Promise(resolve => setTimeout(resolve, 0));
+      
+      // Now start logging our processing steps
+      logger.info(`Processing GPT request from ${user.username}: ${prompt}`);
+
+      let response;
       // Check for URLs in the prompt
       const urlMatch = prompt.match(/(https?:\/\/)?(?:www\.)?(i\.)?(?:nuuls\.com|kappa\.lol|twitch\.tv|youtube\.com|youtu\.be|[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\/\S+/gi);
+      
       if (urlMatch) {
-        const analysis = await this.analyzeContentInMessage(message);
+        logger.info(`Starting content analysis for URL in prompt: ${urlMatch[0]}`);
+        const analysis = await this.analyzeContentInMessage(prompt);
         if (analysis) {
-          return `@${user.username} ${analysis}`;
+          response = `@${user.username} ${analysis}`;
         }
       }
 
-      const systemMessage = { role: "system", content: SYSTEM_PROMPT };
-      const userMessage = { 
-        role: "user", 
-        content: prompt 
-      };
+      // If no URL analysis or it failed, proceed with normal GPT response
+      if (!response) {
+        const systemMessage = { role: "system", content: SYSTEM_PROMPT };
+        const userMessage = { role: "user", content: prompt };
 
-      // Check cache first
-      const cachedResponse = this.getFromCache(user.userId, prompt);
-      if (cachedResponse) {
-        return `@${user.username} ${cachedResponse}`;
+        logger.debug('Sending request to OpenAI');
+        const gptResponse = await this.openai.chat.completions.create({
+          model: GPT_MODEL,
+          messages: [systemMessage, userMessage],
+          max_tokens: MAX_TOKENS,
+          temperature: TEMPERATURE,
+        });
+
+        const generatedResponse = gptResponse.choices[0].message.content;
+        response = `@${user.username} ${generatedResponse}`;
+        
+        // Cache the response
+        this.addToCache(user.userId, prompt, generatedResponse);
       }
 
-      const response = await this.openai.chat.completions.create({
-        model: GPT_MODEL,
-        messages: [systemMessage, userMessage],
-        max_tokens: MAX_TOKENS,
-        temperature: TEMPERATURE,
-      });
-
-      const generatedResponse = response.choices[0].message.content;
+      // Log and send the final response
+      await MessageLogger.logBotMessage(channel, response);
+      await context.say(response);
       
-      // Cache the response
-      this.addToCache(user.userId, prompt, generatedResponse);
-      
-      return `@${user.username} ${generatedResponse}`;
     } catch (error) {
       logger.error(`Error processing GPT command: ${error.message}`);
-      return `@${user.username}, Sorry, an error occurred while processing your request.`;
+      const errorResponse = `@${user.username}, Sorry, an error occurred while processing your request.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
     }
   }
 
@@ -520,7 +542,7 @@ class GptHandler {
     const truncatedMessages = await this.truncateMessages(messages);
 
     const response = await this.openai.chat.completions.create({
-      model: GPT_MODEL, // Changed from "o1-mini" to "gpt-4o"
+      model: GPT_MODEL,
       messages: truncatedMessages,
       max_tokens: MAX_TOKENS,
       temperature: TEMPERATURE,
@@ -749,7 +771,10 @@ class GptHandler {
       const recentMessages = await MessageLogger.getRecentMessages(channel, 10);
       if (!recentMessages || recentMessages.length === 0) {
         logger.warn(`No recent messages found for ${channel}`);
-        return `@${user.username} Sorry, I couldn't access the recent chat history.`;
+        const response = `@${user.username} Sorry, I couldn't access the recent chat history.`;
+        await MessageLogger.logBotMessage(channel, response); // Log the message
+        await context.say(response); // Send the message
+        return;
       }
 
       const isRevulate = user.username.toLowerCase() === 'revulate';
@@ -805,22 +830,32 @@ class GptHandler {
         const generatedResponse = response.choices[0].message.content.trim();
         // For Revulate, ensure we're using direct address
         if (isRevulate) {
-          return generatedResponse
+          const finalResponse = generatedResponse
             .replace(/revulate's/gi, "your")
             .replace(/revulate is/gi, "you are")
             .replace(/revulate has/gi, "you have")
             .replace(/revulate/gi, "you")
             .replace(/^@you/, "@Revulate"); // Fix the mention
+          await MessageLogger.logBotMessage(channel, finalResponse); // Log the message
+          await context.say(finalResponse); // Send the message
+          return;
         }
-        return generatedResponse.startsWith(`@${user.username}`) ? 
+        const finalResponse = generatedResponse.startsWith(`@${user.username}`) ? 
           generatedResponse : 
           `@${user.username} ${generatedResponse}`;
+        await MessageLogger.logBotMessage(channel, finalResponse); // Log the message
+        await context.say(finalResponse); // Send the message
+        return;
       }
 
-      return `@${user.username} Sorry, I couldn't generate a proper response.`;
+      const errorResponse = `@${user.username} Sorry, I couldn't generate a proper response.`;
+      await MessageLogger.logBotMessage(channel, errorResponse); // Log the error message
+      await context.say(errorResponse); // Send the error message
     } catch (error) {
       logger.error(`Error handling direct mention: ${error}`);
-      return `@${user.username} Sorry, I'm having trouble processing that right now!`;
+      const errorResponse = `@${user.username} Sorry, I'm having trouble processing that right now!`;
+      await MessageLogger.logBotMessage(channel, errorResponse); // Log the error message
+      await context.say(errorResponse); // Send the error message
     }
   }
 
@@ -906,7 +941,10 @@ class GptHandler {
             context: recentMessages,
             urlAnalysis: urlContent
           });
-          return `@${mentionedUserName} ${response}`;
+          const finalResponse = `@${mentionedUserName} ${response}`;
+          await MessageLogger.logBotMessage(channel, finalResponse); // Log the message
+          await context.say(finalResponse); // Send the message
+          return;
         }
       }
       
@@ -930,13 +968,20 @@ class GptHandler {
           .replace(/^Luna:\s*/i, '')  // Remove "Luna:" prefix
           .replace(new RegExp(`@${mentionedUserName}\\s+@${mentionedUserName}`, 'gi'), `@${mentionedUserName}`); // Remove duplicate mentions
         
-        return cleanedResponse.startsWith(`@${mentionedUserName}`) ? cleanedResponse : `@${mentionedUserName} ${cleanedResponse}`;
+        const finalResponse = cleanedResponse.startsWith(`@${mentionedUserName}`) ? cleanedResponse : `@${mentionedUserName} ${cleanedResponse}`;
+        await MessageLogger.logBotMessage(channel, finalResponse); // Log the message
+        await context.say(finalResponse); // Send the message
+        return;
       }
       
-      return `@${mentionedUserName} Sorry, I couldn't generate a proper response.`;
+      const errorResponse = `@${mentionedUserName} Sorry, I couldn't generate a proper response.`;
+      await MessageLogger.logBotMessage(channel, errorResponse); // Log the error message
+      await context.say(errorResponse); // Send the error message
     } catch (error) {
       logger.error(`Error generating mention response for ${channel}: ${error.message}`);
-      return `@${user?.name || 'Unknown User'} Oops, something went wrong while processing your message.`;
+      const errorResponse = `@${user?.name || 'Unknown User'} Oops, something went wrong while processing your message.`;
+      await MessageLogger.logBotMessage(channel, errorResponse); // Log the error message
+      await context.say(errorResponse); // Send the error message
     }
   }
 
@@ -1351,18 +1396,18 @@ export function setupGpt(chatClient) {
       try {
         const { channel, user, args } = context;
         if (!args || args.length === 0) {
-          await context.say(`@${user.username}, please provide a message after the #gpt command.`);
+          const response = `@${user.username}, please provide a message after the #gpt command.`;
+          await MessageLogger.logBotMessage(channel, response); // Log the message
+          await context.say(response); // Send the message
           return;
         }
 
-        const prompt = args.join(' ');
-        const response = await handler.handleGptCommand(channel, user, args, prompt);
-        if (response) {
-          await context.say(response);
-        }
+        await handler.handleGptCommand(context);
       } catch (error) {
         logger.error(`Error in GPT command: ${error}`);
-        await context.say(`@${context.user.username}, Sorry, an error occurred.`);
+        const errorResponse = `@${context.user.username}, Sorry, an error occurred.`;
+        await MessageLogger.logBotMessage(context.channel, errorResponse); // Log the error message
+        await context.say(errorResponse); // Send the error message
       }
     },
     ask: async (context) => {
@@ -1373,18 +1418,24 @@ export function setupGpt(chatClient) {
       try {
         const { channel, user, args } = context;
         if (!args || args.length === 0) {
-          await context.say(`@${user.username}, please provide content to analyze.`);
+          const response = `@${user.username}, please provide content to analyze.`;
+          await MessageLogger.logBotMessage(channel, response); // Log the message
+          await context.say(response); // Send the message
           return;
         }
 
         const content = args.join(' ');
         const analysis = await handler.analyzeContentInMessage(content);
         if (analysis) {
-          await context.say(`@${user.username} ${analysis}`);
+          const response = `@${user.username} ${analysis}`;
+          await MessageLogger.logBotMessage(channel, response); // Log the message
+          await context.say(response); // Send the message
         }
       } catch (error) {
         logger.error(`Error in analyze command: ${error}`);
-        await context.say(`@${context.user.username}, Sorry, an error occurred.`);
+        const errorResponse = `@${context.user.username}, Sorry, an error occurred.`;
+        await MessageLogger.logBotMessage(context.channel, errorResponse); // Log the error message
+        await context.say(errorResponse); // Send the error message
       }
     }
   };
