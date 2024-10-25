@@ -18,6 +18,7 @@ import path from 'path';
 import TwitchEventManager from '../TwitchEventManager.js'; // Import TwitchEventManager
 import { authenticate } from '@google-cloud/local-auth';
 import fs from 'fs';
+import MessageLogger from '../MessageLogger.js';
 
 dotenv.config();
 
@@ -117,7 +118,9 @@ class DVP {
       // Start periodic updates
       this.startPeriodicScrapeUpdate();
       
-      // Single initialization message at the end
+      // Set initialized flag after everything is ready
+      this.initialized = true;
+      
       logger.info('DVP module initialized successfully');
     } catch (error) {
       logger.error(`Error in DVP init: ${error}`);
@@ -194,11 +197,7 @@ class DVP {
     }
   }
 
-  _prepareStatements() {
-    if (!this.db) {
-      throw new Error('Database not initialized when preparing statements');
-    }
-
+  async _prepareStatements() {
     this.preparedStatements = {
       insertGame: this.db.prepare(`
         INSERT OR REPLACE INTO games (name, time_played, last_played, image_url)
@@ -212,7 +211,7 @@ class DVP {
       `),
       getMetadata: this.db.prepare('SELECT value FROM metadata WHERE key = ?'),
       setMetadata: this.db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)'),
-      selectActiveGames: this.db.prepare('SELECT * FROM games WHERE image_url IS NOT NULL'),
+      selectActiveGames: this.db.prepare('SELECT * FROM games ORDER BY last_played DESC'),
       updateLastPlayed: this.db.prepare('UPDATE games SET last_played = ? WHERE name = ?'),
     };
   }
@@ -261,160 +260,110 @@ class DVP {
     logger.info('Starting optimized data scraping...');
     const browser = await chromium.launch({ headless: true });
     try {
-      const context = await browser.newContext();
-      const page = await context.newPage();
+        const context = await browser.newContext();
+        const page = await context.newPage();
 
-      await page.goto(`https://twitchtracker.com/${this.channelName}/games`);
-      await page.waitForSelector('#games');
+        await page.goto(`https://twitchtracker.com/${this.channelName}/games`);
+        await page.waitForSelector('#games');
 
-      // Check if Last Seen is already in descending order
-      const lastSeenHeader = await page.$('th[aria-label*="Last Seen"]');
-      const isDescending = await lastSeenHeader.evaluate(el => 
-        el.classList.contains('sorting_desc') || 
-        el.getAttribute('aria-sort') === 'descending'
-      );
-
-      // Only click if not already in descending order
-      if (!isDescending) {
-        await lastSeenHeader.click();
-        await page.waitForTimeout(1000);
-        
-        // Click again if needed to get to descending order
-        const isNowDescending = await lastSeenHeader.evaluate(el => 
-          el.classList.contains('sorting_desc') || 
-          el.getAttribute('aria-sort') === 'descending'
+        // Check if Last Seen is already in descending order
+        const lastSeenHeader = await page.$('th[aria-label*="Last Seen"]');
+        const isDescending = await lastSeenHeader.evaluate(el => 
+            el.classList.contains('sorting_desc') || 
+            el.getAttribute('aria-sort') === 'descending'
         );
-        if (!isNowDescending) {
-          await lastSeenHeader.click();
-          await page.waitForTimeout(1000);
-        }
-      }
 
-      // Get initial batch of rows (first page only)
-      const initialRows = await page.$$('#games tbody tr');
-      if (!initialRows.length) {
-        logger.info('No game rows found');
-        return;
-      }
-
-      // Check first few games (most recent)
-      const INITIAL_CHECK_COUNT = 5;  // Changed from 10 to 5
-      const MAX_CHECK_COUNT = 10;     // Added new constant for max check
-      const recentGames = [];
-      let needsFullUpdate = false;
-
-      for (let i = 0; i < Math.min(INITIAL_CHECK_COUNT, initialRows.length); i++) {
-        const gameData = await this.extractGameData(initialRows[i]);
-        const existingGame = this.preparedStatements.selectGame.get(gameData.name);
-
-        if (!existingGame || 
-            existingGame.time_played !== gameData.timePlayed || 
-            existingGame.last_played !== gameData.lastPlayed) {
-          recentGames.push({
-            ...gameData,
-            image_url: existingGame?.image_url || null
-          });
-          needsFullUpdate = true;
-        } else {
-          // If we find a game that hasn't changed, and it's not the first game,
-          // we can assume older games haven't changed either
-          if (i > 0) {
-            logger.info(`No changes detected after ${i} games, skipping full update`);
-            needsFullUpdate = false;
-            break;
-          }
-        }
-      }
-
-      // If we need full update, check up to MAX_CHECK_COUNT games
-      if (needsFullUpdate) {
-        logger.info('Changes detected in recent games, checking additional games');
-        
-        for (let i = INITIAL_CHECK_COUNT; i < Math.min(MAX_CHECK_COUNT, initialRows.length); i++) {
-          const gameData = await this.extractGameData(initialRows[i]);
-          const existingGame = this.preparedStatements.selectGame.get(gameData.name);
-
-          if (!existingGame || 
-              existingGame.time_played !== gameData.timePlayed || 
-              existingGame.last_played !== gameData.lastPlayed) {
-            recentGames.push({
-              ...gameData,
-              image_url: existingGame?.image_url || null
-            });
-          }
-        }
-
-        // Only if we found changes in the first 10 games do we load all games
-        if (recentGames.length > 0) {
-          logger.info('Changes detected in recent games, performing full update');
-          await page.selectOption('select[name="games_length"]', '-1');
-          await page.waitForTimeout(5000);
-
-          const allRows = await page.$$('#games tbody tr');
-          logger.info(`Checking all ${allRows.length} games for updates`);
-
-          let unchangedStreak = 0;
-          const UNCHANGED_THRESHOLD = 20;
-
-          for (let i = MAX_CHECK_COUNT; i < allRows.length; i++) {
-            const gameData = await this.extractGameData(allRows[i]);
-            const existingGame = this.preparedStatements.selectGame.get(gameData.name);
-
-            if (!existingGame || 
-                existingGame.time_played !== gameData.timePlayed || 
-                existingGame.last_played !== gameData.lastPlayed) {
-              recentGames.push({
-                ...gameData,
-                image_url: existingGame?.image_url || null
-              });
-              unchangedStreak = 0;
-            } else {
-              unchangedStreak++;
-              if (unchangedStreak >= UNCHANGED_THRESHOLD) {
-                logger.info(`Found ${UNCHANGED_THRESHOLD} unchanged games in a row, stopping scan`);
-                break;
-              }
-            }
-          }
-        }
-      }
-
-      // Update the database with any changes
-      if (recentGames.length > 0) {
-        logger.info(`Found ${recentGames.length} games that need updating`);
-        const transaction = this.db.transaction((games) => {
-          for (const game of games) {
-            this.preparedStatements.insertGame.run(
-              game.name,
-              game.timePlayed,
-              game.lastPlayed,
-              game.image_url
+        // Only click if not already in descending order
+        if (!isDescending) {
+            await lastSeenHeader.click();
+            await page.waitForTimeout(1000);
+            
+            // Click again if needed to get to descending order
+            const isNowDescending = await lastSeenHeader.evaluate(el => 
+                el.classList.contains('sorting_desc') || 
+                el.getAttribute('aria-sort') === 'descending'
             );
-          }
-        });
-        transaction(recentGames);
-      } else {
-        logger.info('No games need updating');
-      }
+            if (!isNowDescending) {
+                await lastSeenHeader.click();
+                await page.waitForTimeout(1000);
+            }
+        }
 
-      logger.info('Data scraping completed successfully');
+        // Get initial batch of rows (first page only)
+        const initialRows = await page.$$('#games tbody tr');
+        if (!initialRows.length) {
+            logger.info('No game rows found');
+            return;
+        }
+
+        // Process rows and handle dates properly
+        for (const row of initialRows) {
+            const gameData = await this.extractGameData(row);
+            
+            // Keep existing image URL when updating
+            const existingGame = this.preparedStatements.selectGame.get(gameData.name);
+            const imageUrl = existingGame?.image_url || null;
+            
+            // Update database with correct date and preserve image URL
+            this.preparedStatements.insertGame.run(
+                gameData.name,
+                gameData.timePlayed,
+                gameData.lastPlayed,
+                imageUrl
+            );
+
+            logger.debug(`Updated game: ${gameData.name}, Last played: ${gameData.lastPlayed}`);
+        }
+
+        logger.info('Data scraping completed successfully');
     } catch (error) {
-      logger.error(`Error during data scraping: ${error}`);
+        logger.error(`Error during data scraping: ${error}`);
     } finally {
-      await browser.close();
+        await browser.close();
     }
   }
 
-  // Helper method to extract game data from a row
+  // Update the parseDate method to handle timezone correctly
+  parseDate(dateStr) {
+    try {
+        // Parse the date string assuming it's in the format 'DD/MMM/YYYY'
+        const parsedDate = parse(dateStr, 'dd/MMM/yyyy', new Date());
+        
+        // Create UTC date to avoid timezone offsets
+        const utcDate = new Date(
+            parsedDate.getUTCFullYear(),
+            parsedDate.getUTCMonth(),
+            parsedDate.getUTCDate()
+        );
+        
+        // Format the date as 'YYYY-MM-DD'
+        return format(utcDate, 'yyyy-MM-dd');
+    } catch (error) {
+        logger.error(`Error parsing date '${dateStr}': ${error}`);
+        // Return current date in UTC as fallback
+        const now = new Date();
+        const utcNow = new Date(
+            now.getUTCFullYear(),
+            now.getUTCMonth(),
+            now.getUTCDate()
+        );
+        return format(utcNow, 'yyyy-MM-dd');
+    }
+  }
+
+  // Update extractGameData method to handle dates properly
   async extractGameData(row) {
     const name = await row.$eval('td:nth-child(2)', el => el.textContent.trim());
     const timePlayedStr = await row.$eval('td:nth-child(3) > span', el => el.textContent.trim());
     const lastSeenStr = await row.$eval('td:nth-child(7)', el => el.textContent.trim());
 
+    // Log the raw date string for debugging
+    logger.debug(`Raw last seen date for ${name}: ${lastSeenStr}`);
+
     return {
-      name,
-      timePlayed: this.parseTime(timePlayedStr),
-      lastPlayed: this.parseDate(lastSeenStr)
+        name,
+        timePlayed: this.parseTime(timePlayedStr),
+        lastPlayed: this.parseDate(lastSeenStr)
     };
   }
 
@@ -423,29 +372,13 @@ class DVP {
     try {
       const rows = this.preparedStatements.selectActiveGames.all();
       for (const { name, image_url } of rows) {
-        this.imageUrlCache.set(name, image_url);
+        if (image_url) {  // Only cache valid URLs
+          this.imageUrlCache.set(name, image_url);
+        }
       }
-      logger.info(`Loaded ${this.imageUrlCache.size} image URLs into cache`);
+      logger.info(`Loaded ${this.imageUrlCache.size} valid image URLs into cache`);
     } catch (error) {
       logger.error(`Error loading image URL cache: ${error}`);
-    }
-  }
-
-  parseDate(dateStr) {
-    try {
-      // Parse the date string assuming it's in the format 'DD/MMM/YYYY'
-      const parsedDate = parse(dateStr, 'dd/MMM/yyyy', new Date());
-      
-      // Check if the parsed date is valid
-      if (isNaN(parsedDate.getTime())) {
-        throw new Error(`Invalid date: ${dateStr}`);
-      }
-      
-      // Format the date as 'YYYY-MM-DD' in UTC
-      return format(parsedDate, 'yyyy-MM-dd', { timeZone: 'UTC' });
-    } catch (error) {
-      logger.error(`Error parsing date '${dateStr}': ${error}`);
-      return format(new Date(), 'yyyy-MM-dd', { timeZone: 'UTC' }); // Return current date as fallback
     }
   }
 
@@ -468,26 +401,51 @@ class DVP {
     return result.join(', ');
   }
 
+  // Update the getGameImageUrl method
   async getGameImageUrl(gameName) {
-    if (this.imageUrlCache.has(gameName)) {
-      logger.info(`Using cached image URL for '${gameName}': ${this.imageUrlCache.get(gameName)}`);
-      return this.imageUrlCache.get(gameName);
-    }
-
-    logger.info(`Fetching image URL for game: ${gameName}`);
     try {
-      const url = await this.twitchEventManager.getGameImageUrl(gameName); // Use TwitchEventManager
-      if (url && validators.isURL(url)) {
-        this.imageUrlCache.set(gameName, url);
-        await this.saveGameImageUrl(gameName, url);
-        logger.info(`Generated and cached new image URL for '${gameName}': ${url}`);
-      } else {
-        logger.warn(`Invalid image URL generated for '${gameName}': ${url}`);
-      }
-      return url;
+        // First check cache
+        if (this.imageUrlCache.has(gameName)) {
+            const cachedUrl = this.imageUrlCache.get(gameName);
+            if (cachedUrl) {  // Only use cache if URL exists
+                logger.info(`Using cached image URL for '${gameName}': ${cachedUrl}`);
+                return cachedUrl;
+            }
+        }
+
+        logger.info(`Fetching image URL for game: ${gameName}`);
+        try {
+            const url = await this.twitchEventManager.getGameImageUrl(gameName);
+            if (url && validators.isURL(url)) {
+                this.imageUrlCache.set(gameName, url);
+                await this.saveGameImageUrl(gameName, url);
+                logger.info(`Generated and cached new image URL for '${gameName}': ${url}`);
+                return url;
+            } else {
+                logger.warn(`Invalid image URL generated for '${gameName}': ${url}`);
+            }
+        } catch (error) {
+            logger.error(`Error fetching image URL for '${gameName}': ${error}`);
+        }
+
+        // If we get here, try to fetch from Twitch again
+        try {
+            const gameInfo = await this.apiClient.games.getGameByName(gameName);
+            if (gameInfo && gameInfo.boxArtUrl) {
+                const url = gameInfo.boxArtUrl.replace('{width}', '285').replace('{height}', '380');
+                this.imageUrlCache.set(gameName, url);
+                await this.saveGameImageUrl(gameName, url);
+                logger.info(`Fetched new image URL for '${gameName}': ${url}`);
+                return url;
+            }
+        } catch (error) {
+            logger.error(`Error in fallback image fetch for '${gameName}': ${error}`);
+        }
+
+        return null;
     } catch (error) {
-      logger.error(`Error fetching image URL for '${gameName}': ${error}`);
-      return null;
+        logger.error(`Error in getGameImageUrl for '${gameName}': ${error}`);
+        return null;
     }
   }
 
@@ -536,15 +494,21 @@ class DVP {
               range: 'VulpesHD Games!A3:D3',
               values: [['Artwork', 'Game', 'Time Played', 'Last Played']]
             },
-            // Update game data
+            // Update game data with corrected date handling
             {
               range: `VulpesHD Games!A4:D${games.length + 3}`,
-              values: await Promise.all(games.map(async game => [
-                game.image_url ? `=IMAGE("${game.image_url}", 4, 190, 142)` : '',
-                game.name,
-                this.formatPlaytime(game.time_played),
-                format(new Date(game.last_played), 'MMMM do, yyyy')
-              ]))
+              values: await Promise.all(games.map(async game => {
+                // Parse the date string and format it correctly
+                const lastPlayedDate = parse(game.last_played, 'yyyy-MM-dd', new Date());
+                const formattedDate = format(lastPlayedDate, 'MMMM do, yyyy');
+                
+                return [
+                  game.image_url ? `=IMAGE("${game.image_url}", 4, 190, 142)` : '',
+                  game.name,
+                  this.formatPlaytime(game.time_played),
+                  formattedDate
+                ];
+              }))
             }
           ]
         }
@@ -612,14 +576,15 @@ class DVP {
     logger.info('Updated initials mapping');
   }
 
+  // Update fetchMissingImages method
   async fetchMissingImages() {
     const now = Date.now();
     
     // Check if we need to update images based on interval
     if (this.lastGameImageUpdate && 
         (now - this.lastGameImageUpdate) < this.GAME_IMAGE_REFRESH_INTERVAL) {
-      logger.info('Skipping image update, not yet time');
-      return false;
+        logger.info('Skipping image update, not yet time');
+        return false;
     }
 
     logger.info('Checking for missing or outdated game images');
@@ -627,27 +592,28 @@ class DVP {
     let imagesFetched = false;
 
     for (const game of games) {
-      // Skip if game has image and it's not time to refresh
-      if (game.image_url && this.imageUrlCache.has(game.name)) {
-        continue;
-      }
-
-      try {
-        const imageUrl = await this.getGameImageUrl(game.name);
-        if (imageUrl) {
-          this.preparedStatements.updateGameImageUrl.run(imageUrl, game.name);
-          this.imageUrlCache.set(game.name, imageUrl);
-          imagesFetched = true;
+        // Check if game needs image update
+        if (!game.image_url || !this.imageUrlCache.has(game.name)) {
+            try {
+                const imageUrl = await this.getGameImageUrl(game.name);
+                if (imageUrl) {
+                    this.preparedStatements.updateGameImageUrl.run(imageUrl, game.name);
+                    this.imageUrlCache.set(game.name, imageUrl);
+                    imagesFetched = true;
+                    logger.info(`Updated image URL for ${game.name}: ${imageUrl}`);
+                }
+            } catch (error) {
+                logger.error(`Error fetching image URL for ${game.name}: ${error}`);
+            }
+            // Add small delay between requests to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
-      } catch (error) {
-        logger.error(`Error fetching image URL for ${game.name}: ${error}`);
-      }
     }
 
     if (imagesFetched) {
-      this.lastGameImageUpdate = now;
-      // Save last image update timestamp to database
-      this.preparedStatements.setMetadata.run('last_image_update', now.toString());
+        this.lastGameImageUpdate = now;
+        this.preparedStatements.setMetadata.run('last_image_update', now.toString());
+        logger.info('Image URLs updated successfully');
     }
 
     logger.info(`Image update completed, ${imagesFetched ? 'changes made' : 'no changes needed'}`);
@@ -655,15 +621,34 @@ class DVP {
   }
 
   async handleDvpCommand(context) {
-    const { channel, user, args } = context;
-    
-    try {
-      let gameName = args.join(' ').trim();
-      if (!gameName) {
-        await context.say(`@${user.username}, please provide a game name.`);
-        return;
-      }
+    const { channel, user, args, command = 'afk' } = context;
+    if (!this.initialized) {
+      const errorResponse = `@${user.username}, DVP module not initialized`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
+      return;
+    }
 
+    const userId = user.id || user.userId || context.rawMessage?.userInfo?.userId;
+    const username = user.username || user.name || user.displayName;
+
+    if (!userId) {
+      logger.error('No user ID found in context:', { user, rawMessage: context.rawMessage });
+      const errorResponse = `@${username}, an error occurred: User ID is missing.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
+      return;
+    }
+
+    let gameName = args.join(' ').trim();
+    if (!gameName) {
+      const usageResponse = `@${username}, please provide a game name.`;
+      await MessageLogger.logBotMessage(channel, usageResponse);
+      await context.say(usageResponse);
+      return;
+    }
+
+    try {
       // First check abbreviations
       let gameNameToSearch = this.abbreviationMapping[gameName.toLowerCase()] || gameName;
 
@@ -675,27 +660,25 @@ class DVP {
 
       // If no exact match found, try fuzzy matching
       if (!result) {
-        // Use extract to get the best matches with scores
         const matches = fuzzball.extract(gameNameToSearch, allGames.map(g => g.name), {
-          scorer: fuzzball.partial_ratio, // Use partial_ratio for better partial matching
-          limit: 3,  // Get top 3 matches
-          cutoff: 65 // Minimum score threshold
+          scorer: fuzzball.partial_ratio,
+          limit: 3,
+          cutoff: 65
         });
 
         if (matches.length > 0) {
-          // Get the best match and its score
           const [bestMatchName, score] = matches[0];
           
-          // If we have a good match, use it
           if (score >= 65) {
             result = allGames.find(g => g.name === bestMatchName);
             gameNameToSearch = bestMatchName;
           } else if (matches.length > 1) {
-            // If we have multiple low-scoring matches, suggest them
             const suggestions = matches
               .map(([name, score]) => name)
               .join(', ');
-            await context.say(`@${user.username}, couldn't find an exact match. Did you mean one of these: ${suggestions}?`);
+            const suggestionResponse = `@${username}, couldn't find an exact match. Did you mean one of these: ${suggestions}?`;
+            await MessageLogger.logBotMessage(channel, suggestionResponse);
+            await context.say(suggestionResponse);
             return;
           }
         }
@@ -705,15 +688,21 @@ class DVP {
         const { time_played, last_played } = result;
         const formattedTime = this.formatPlaytime(time_played);
         const lastPlayedDate = parse(last_played, 'yyyy-MM-dd', new Date());
-        const lastPlayedFormatted = format(lastPlayedDate, 'MMMM d, yyyy');
+        const lastPlayedFormatted = format(lastPlayedDate, 'MMMM do, yyyy');
 
-        await context.say(`@${user.username}, Vulpes last played ${gameNameToSearch} on ${lastPlayedFormatted} • Total playtime: ${formattedTime}.`);
+        const response = `@${username}, Vulpes last played ${gameNameToSearch} on ${lastPlayedFormatted} • Total playtime: ${formattedTime}.`;
+        await MessageLogger.logBotMessage(channel, response);
+        await context.say(response);
       } else {
-        await context.say(`@${user.username}, couldn't find any games matching "${gameName}".`);
+        const notFoundResponse = `@${username}, couldn't find any games matching "${gameName}".`;
+        await MessageLogger.logBotMessage(channel, notFoundResponse);
+        await context.say(notFoundResponse);
       }
     } catch (error) {
       logger.error(`Error executing dvp command: ${error}`);
-      await context.say(`@${user.username}, an error occurred while processing your request. Please try again later.`);
+      const errorResponse = `@${username}, an error occurred while processing your request. Please try again later.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
     }
   }
 
@@ -721,15 +710,18 @@ class DVP {
     const { channel, user } = context;
     
     if (user.username.toLowerCase() !== 'revulate') {
-      await context.say(`@${user.username}, sorry, only Revulate can use this command.`);
+      const unauthorizedResponse = `@${user.username}, sorry, only Revulate can use this command.`;
+      await MessageLogger.logBotMessage(channel, unauthorizedResponse);
+      await context.say(unauthorizedResponse);
       return;
     }
 
     logger.info(`Force update initiated by ${user.username}`);
-    await context.say(`@${user.username}, initiating force update. This may take a moment...`);
+    const initResponse = `@${user.username}, initiating force update. This may take a moment...`;
+    await MessageLogger.logBotMessage(channel, initResponse);
+    await context.say(initResponse);
 
     try {
-      // Perform full update sequence
       logger.info('Starting web scraping update');
       await this.scrapeInitialData();
       
@@ -742,26 +734,36 @@ class DVP {
       logger.info('Saving last scrape time');
       await this.saveLastScrapeTime();
 
-      await context.say(`@${user.username}, force update completed successfully!`);
+      const successResponse = `@${user.username}, force update completed successfully!`;
+      await MessageLogger.logBotMessage(channel, successResponse);
+      await context.say(successResponse);
       logger.info('Force update completed successfully');
     } catch (error) {
       logger.error(`Error during force update: ${error}`);
-      await context.say(`@${user.username}, an error occurred during the force update. Please check the logs.`);
+      const errorResponse = `@${user.username}, an error occurred during the force update. Please check the logs.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
     }
   }
 
   async handleSheetCommand(context) {
     try {
-        const { user } = context;
-        if (!this.sheetUrl) {
-            await context.say(`@${user.username}, Sorry, the sheet URL is not configured.`);
-            return;
-        }
-        await context.say(`@${user.username}, you can view Vulpes's game stats here: ${this.sheetUrl}`);
-        logger.info(`Sheet command executed by ${user.username}`);
+      const { user, channel } = context;
+      if (!this.sheetUrl) {
+        const errorResponse = `@${user.username}, Sorry, the sheet URL is not configured.`;
+        await MessageLogger.logBotMessage(channel, errorResponse);
+        await context.say(errorResponse);
+        return;
+      }
+      const response = `@${user.username}, you can view Vulpes's game stats here: ${this.sheetUrl}`;
+      await MessageLogger.logBotMessage(channel, response);
+      await context.say(response);
+      logger.info(`Sheet command executed by ${user.username}`);
     } catch (error) {
-        logger.error(`Error in sheet command: ${error}`);
-        await context.say(`@${user.username}, Sorry, an error occurred while retrieving the sheet URL.`);
+      logger.error(`Error in sheet command: ${error}`);
+      const errorResponse = `@${user.username}, Sorry, an error occurred while retrieving the sheet URL.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
     }
   }
 
@@ -1398,27 +1400,163 @@ class DVP {
       );
     `);
   }
+
+  async findGameIdByName(gameName) {
+    logger.info(`Searching for game by name: ${gameName}`);
+    const normalizedGameName = this._normalizeGameName(gameName);
+    const lowerGameName = normalizedGameName.toLowerCase();
+    
+    // Check if input is too short or vague
+    if (lowerGameName.length < 2 || /^[a-z]$/i.test(lowerGameName)) {
+      throw new Error('Please provide a more specific game name.');
+    }
+
+    // First check abbreviations
+    if (this.abbreviationMapping[lowerGameName]) {
+      return await this.findGameIdByName(this.abbreviationMapping[lowerGameName]);
+    }
+
+    try {
+        // Get all games from database
+        const allGames = this.preparedStatements.selectAllGames.all();
+        
+        // Calculate scores for each game
+        const matches = allGames.map(game => {
+            const gameName = game.name.toLowerCase();
+            
+            // Split game name to handle prefixes and suffixes
+            const parts = gameName.split(/[:|-]/);
+            const mainTitle = parts[parts.length - 1].trim();
+            const prefix = parts.length > 1 ? parts[0].trim() : '';
+
+            // Calculate various match scores
+            const scores = {
+                // Exact match with full name (highest priority)
+                exactMatch: gameName === lowerGameName ? 100 : 0,
+                
+                // Exact match with main title
+                mainTitleExact: mainTitle === lowerGameName ? 90 : 0,
+                
+                // Partial ratio for substring matching
+                partialRatio: fuzzball.partial_ratio(lowerGameName, mainTitle),
+                
+                // Token sort ratio for word order independence
+                tokenSortRatio: fuzzball.token_sort_ratio(lowerGameName, gameName),
+                
+                // Token set ratio for handling extra/missing words
+                tokenSetRatio: fuzzball.token_set_ratio(lowerGameName, mainTitle),
+                
+                // Length penalty for very short queries
+                lengthPenalty: lowerGameName.length < 3 ? -50 : 0,
+                
+                // Bonus for exact word matches
+                wordMatchBonus: (() => {
+                    const searchWords = lowerGameName.split(' ');
+                    const gameWords = gameName.split(' ');
+                    const exactMatches = searchWords.filter(word => 
+                        word.length > 2 && gameWords.includes(word)
+                    ).length;
+                    return (exactMatches / searchWords.length) * 30;
+                })(),
+                
+                // Penalty for common words
+                commonWordPenalty: (() => {
+                    const commonWords = ['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to'];
+                    return lowerGameName.split(' ').every(word => commonWords.includes(word)) ? -50 : 0;
+                })()
+            };
+
+            // Calculate weighted total score
+            const totalScore = (
+                (scores.exactMatch * 0.35) +
+                (scores.mainTitleExact * 0.25) +
+                (scores.partialRatio * 0.15) +
+                (scores.tokenSortRatio * 0.10) +
+                (scores.tokenSetRatio * 0.10) +
+                scores.lengthPenalty +
+                scores.wordMatchBonus +
+                scores.commonWordPenalty
+            );
+
+            return {
+                game,
+                scores,
+                totalScore
+            };
+        });
+
+        // Filter and sort matches
+        const validMatches = matches
+            .filter(m => m.totalScore > 60) // Increased threshold
+            .sort((a, b) => b.totalScore - a.totalScore);
+
+        // Log top matches for debugging
+        logger.debug(`Top matches for "${normalizedGameName}":`, 
+            validMatches.slice(0, 3).map(m => ({
+                name: m.game.name,
+                score: m.totalScore,
+                scores: m.scores
+            }))
+        );
+
+        // If we have a clear best match
+        if (validMatches.length > 0 && 
+            validMatches[0].totalScore >= 75 && // Increased threshold
+            (validMatches.length === 1 || validMatches[0].totalScore - validMatches[1].totalScore > 15)) {
+            return validMatches[0].game.id;
+        }
+
+        // If we have multiple close matches, suggest them
+        if (validMatches.length > 0) {
+            const suggestions = validMatches
+                .slice(0, 3)
+                .map(m => m.game.name)
+                .join(', ');
+            throw new Error(`Multiple matches found. Did you mean: ${suggestions}?`);
+        }
+
+        // No good matches found
+        throw new Error(`No games found matching "${gameName}".`);
+
+    } catch (error) {
+        logger.error(`Error during game search: ${error}`);
+        throw error;
+    }
+  }
+
+  // Helper method to normalize game names
+  _normalizeGameName(name) {
+    return name
+        .toLowerCase()
+        .replace(/[!?:]/g, '') // Remove special characters
+        .replace(/\s+/g, ' ')  // Normalize spaces
+        .trim();
+  }
 } // <-- Class definition ends here
 
 // Export both the class and the setup function
 export { DVP };
 export async function setupDvp(bot) {
-  const dvp = new DVP(bot);
-  
-  // Wait for initialization to complete
-  await new Promise(resolve => {
-    const checkInit = setInterval(() => {
-      if (dvp.db && dvp.auth) {
-        clearInterval(checkInit);
-        resolve();
-      }
-    }, 100);
-  });
-
-  // Return all command handlers with proper binding
-  return {
-    'dvp': (context) => dvp.handleDvpCommand(context),
-    'dvpupdate': (context) => dvp.handleDvpUpdateCommand(context),
-    'sheet': (context) => dvp.handleSheetCommand(context)
-  };
+  try {
+    const dvp = new DVP(bot);
+    
+    // Wait for initialization to complete
+    await dvp.init(bot);
+    
+    // Only return commands if initialization was successful
+    if (!dvp.initialized) {
+      throw new Error('DVP module failed to initialize');
+    }
+    
+    // Return all command handlers with proper binding
+    return {
+      'dvp': (context) => dvp.handleDvpCommand(context),
+      'dvpupdate': (context) => dvp.handleDvpUpdateCommand(context),
+      'sheet': (context) => dvp.handleSheetCommand(context)
+    };
+  } catch (error) {
+    logger.error(`Failed to setup DVP module: ${error}`);
+    // Return empty object to prevent undefined errors
+    return {};
+  }
 }
