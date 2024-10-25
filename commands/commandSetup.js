@@ -9,8 +9,11 @@ import { setupMessageLookup } from './messageLookup.js';
 import { setupSteam } from './steam.js';
 import { setupDvp } from './dvp.js';
 import { setupStats } from './stats.js';
+import { setupClaude } from './claude.js';
+import TwitchEventManager from '../TwitchEventManager.js';
+import { config } from '../config.js';
 
-export async function setupCommands(bot) {
+export async function setupCommands(chatClient) {
   logger.info('Starting setupCommands function');
   
   // Initialize MessageLogger if not already initialized
@@ -23,7 +26,7 @@ export async function setupCommands(bot) {
   // Create a wrapper that includes both chatClient and apiClient
   const createCommandContext = (context) => ({
     ...context,
-    say: async (text) => await bot.say(context.channel, text)
+    say: async (text) => await chatClient.say(context.channel, text)
   });
 
   const registerCommand = (name, handler, source) => {
@@ -33,7 +36,7 @@ export async function setupCommands(bot) {
           await handler(createCommandContext(context));
         } catch (error) {
           logger.error(`Error in ${name} command:`, error);
-          await bot.say(context.channel, 
+          await chatClient.say(context.channel, 
             `@${context.user.username}, Sorry, an error occurred.`);
         }
       };
@@ -45,13 +48,13 @@ export async function setupCommands(bot) {
 
   // Setup commands with proper context
   logger.debug('Setting up rate commands...');
-  const rateCommands = setupRate(bot);
+  const rateCommands = setupRate(chatClient);
   Object.entries(rateCommands).forEach(([name, handler]) => {
     registerCommand(name.toLowerCase(), handler, 'Rate');
   });
 
   logger.debug('Setting up preview commands...');
-  const previewCommands = setupPreview(bot);
+  const previewCommands = setupPreview(chatClient);
   Object.entries(previewCommands).forEach(([name, handler]) => {
     const commandName = name.toLowerCase();
     logger.debug(`Registering preview command: ${commandName}`);
@@ -59,7 +62,7 @@ export async function setupCommands(bot) {
   });
 
   logger.debug('Setting up AFK commands...');
-  const afkSetup = await setupAfk(bot);
+  const afkSetup = await setupAfk(chatClient);
   if (afkSetup && afkSetup.commands) {
     Object.entries(afkSetup.commands).forEach(([name, handler]) => {
       const commandName = name.toLowerCase();
@@ -69,7 +72,7 @@ export async function setupCommands(bot) {
   }
 
   logger.debug('Setting up GPT commands...');
-  const gptCommands = setupGpt(bot);
+  const gptCommands = setupGpt(chatClient);
   Object.entries(gptCommands).forEach(([name, handler]) => {
     const commandName = name.toLowerCase();
     logger.debug(`Registering GPT command: ${commandName}`);
@@ -77,7 +80,7 @@ export async function setupCommands(bot) {
   });
 
   logger.debug('Setting up 7TV commands...');
-  const sevenTvCommands = setup7tv(bot);
+  const sevenTvCommands = setup7tv(chatClient);
   Object.entries(sevenTvCommands).forEach(([name, handler]) => {
     const commandName = name.toLowerCase();
     logger.debug(`Registering 7TV command: ${commandName}`);
@@ -86,14 +89,14 @@ export async function setupCommands(bot) {
 
   // Setup message lookup commands
   logger.debug('Setting up message lookup commands...');
-  const messageLookupCommands = setupMessageLookup(bot);
+  const messageLookupCommands = setupMessageLookup(chatClient);
   Object.entries(messageLookupCommands).forEach(([name, handler]) => {
     registerCommand(name.toLowerCase(), handler, 'MessageLookup');
   });
 
   // Setup Steam commands
   logger.debug('Setting up Steam commands...');
-  const steamCommands = setupSteam(bot);
+  const steamCommands = setupSteam(chatClient);
   Object.entries(steamCommands).forEach(([name, handler]) => {
     const commandName = name.toLowerCase();
     logger.debug(`Registering Steam command: ${commandName}`);
@@ -102,7 +105,7 @@ export async function setupCommands(bot) {
 
   // Setup DVP commands
   logger.debug('Setting up DVP commands...');
-  const dvpCommands = await setupDvp(bot);
+  const dvpCommands = await setupDvp(chatClient);
   Object.entries(dvpCommands).forEach(([name, handler]) => {
     const commandName = name.toLowerCase();
     logger.debug(`Registering DVP command: ${commandName}`);
@@ -111,10 +114,26 @@ export async function setupCommands(bot) {
 
   // Setup Stats commands
   logger.debug('Setting up Stats commands...');
-  const statsCommands = await setupStats(bot);
+  const statsCommands = await setupStats(chatClient);
   Object.entries(statsCommands).forEach(([name, handler]) => {
     registerCommand(name.toLowerCase(), handler, 'Stats');
   });
+
+  // Setup Claude commands
+  const claudeSetup = setupClaude(chatClient);
+  let claudeHandler;
+
+  Object.entries(claudeSetup).forEach(([name, value]) => {
+    if (name === 'handler') {
+      claudeHandler = value;
+    } else {
+      registerCommand(name.toLowerCase(), value, 'Claude');
+    }
+  });
+
+  // Create TwitchEventManager instance with Claude handler
+  const eventManager = new TwitchEventManager(chatClient.apiClient, chatClient, config.twitch.channels);
+  eventManager.claudeHandler = claudeHandler;
 
   logger.info('All commands registered successfully');
   logger.debug(`Registered commands: ${Array.from(registeredCommands.keys()).join(', ')}`);
@@ -125,8 +144,10 @@ export async function setupCommands(bot) {
     logger.debug(`- ${name}`);
   });
 
-  // Just return the commands map
+  // Return both commands and handlers
   return {
-    commands: registeredCommands
+    commands: registeredCommands,
+    claudeHandler,
+    eventManager
   };
 }

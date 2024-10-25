@@ -33,7 +33,8 @@ class Rate {
     });
   }
 
-  async handleCuteCommand({ channel, user, args }) {
+  async handleCuteCommand(context) {
+    const { channel, user, args } = context;
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% cute. ${rateInfo.percentage >= 50 ? 'MenheraCute' : 'SadgeCry'}`;
@@ -41,7 +42,8 @@ class Rate {
     await context.say(response);
   }
 
-  async handleGayCommand({ channel, user, args }) {
+  async handleGayCommand(context) {
+    const { channel, user, args } = context;
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% gay. ${rateInfo.percentage > 50 ? 'Gayge' : '📏'}`;
@@ -49,7 +51,8 @@ class Rate {
     await context.say(response);
   }
 
-  async handleStraightCommand({ channel, user, args }) {
+  async handleStraightCommand(context) {
+    const { channel, user, args } = context;
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% straight. ${rateInfo.percentage > 50 ? '📏' : 'Hmm'}`;
@@ -57,7 +60,8 @@ class Rate {
     await context.say(response);
   }
 
-  async handleMydCommand({ channel, user, args }) {
+  async handleMydCommand(context) {
+    const { channel, user, args } = context;
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const lengthCm = Math.floor(Math.random() * (20 - 7.5 + 1)) + 7.5;
     const girthCm = Math.floor(Math.random() * (15 - 7 + 1)) + 7;
@@ -66,7 +70,8 @@ class Rate {
     await context.say(response);
   }
 
-  async handleRateCommand({ channel, user, args }) {
+  async handleRateCommand(context) {
+    const { channel, user, args } = context;
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(10, 5);
     const response = `I would give @${mentionedUser} a ${rateInfo.percentage}/10. ${rateInfo.percentage > 5 ? 'CHUG' : 'Hmm'}`;
@@ -74,7 +79,8 @@ class Rate {
     await context.say(response);
   }
 
-  async handleHornyCommand({ channel, user, args }) {
+  async handleHornyCommand(context) {
+    const { channel, user, args } = context;
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% horny right now. ${rateInfo.percentage > 50 ? 'HORNY' : 'Hmm'}`;
@@ -104,7 +110,8 @@ class Rate {
     }
   }
 
-  async handleSusCommand({ channel, user, args }) {
+  async handleSusCommand(context) {
+    const { channel, user, args } = context;
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% sus! ${rateInfo.percentage > 50 ? 'SUSSY' : 'Hmm'}`;
@@ -239,8 +246,8 @@ function handleAll(context) {
 }
 
 // Export the Rate class and setup function
-export function setupRate(bot) {
-  const rateHandler = new Rate(bot);
+export function setupRate(chatClient) {
+  const rateHandler = new Rate(chatClient);
   
   return {
     cute: (context) => rateHandler.handleCuteCommand(context),

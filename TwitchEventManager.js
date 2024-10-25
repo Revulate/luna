@@ -29,6 +29,16 @@ export default class TwitchEventManager extends EventEmitter {
     
     this.messageLogger = null;
     logger.info(`TwitchEventManager initialized with channels: ${Array.from(this.channels).join(', ')}`);
+    
+    // Add stream monitoring
+    this.streamMonitors = new Map();
+    this.lastStreamAnalysis = new Map();
+    this.streamAnalysisInterval = 10 * 60 * 1000; // 10 minutes
+    
+    // Start stream monitoring
+    this.startStreamMonitoring();
+    
+    this.claudeHandler = null; // Add this line
   }
 
   async getGameImageUrl(gameName) {
@@ -153,13 +163,16 @@ export default class TwitchEventManager extends EventEmitter {
     });
 
     this.chatClient.onJoin((channel, username) => {
-      const channelName = channel.replace('#', '');
-      this.channels.add(channelName);
-      logger.info(`Joined channel: ${channelName}`);
+      const channelName = channel.replace(/^#/, '').toLowerCase();
+      // Only add to channels if it's not already there
+      if (!this.channels.has(channelName)) {
+        this.channels.add(channelName);
+        logger.info(`Joined channel: ${channelName}`);
+      }
     });
 
     this.chatClient.onPart((channel, username) => {
-      const channelName = channel.replace('#', '');
+      const channelName = channel.replace(/^#/, '').toLowerCase();
       this.channels.delete(channelName);
       logger.info(`Left channel: ${channelName}`);
     });
@@ -170,14 +183,21 @@ export default class TwitchEventManager extends EventEmitter {
   }
 
   async joinChannel(channel) {
+    const normalizedChannel = channel.replace(/^#/, '').toLowerCase();
+    
+    // Check if already in channel using both the Set and chatClient's channels
+    if (this.channels.has(normalizedChannel) || 
+        this.chatClient.channels.includes(`#${normalizedChannel}`)) {
+      logger.debug(`Already in channel: ${normalizedChannel}`);
+      return;
+    }
+
     try {
-      const channelName = channel.replace('#', '').toLowerCase();
-      await this.chatClient.join(channelName);
-      this.channels.add(channelName);
-      return true;
+      await this.chatClient.join(normalizedChannel);
+      this.channels.add(normalizedChannel);
+      logger.info(`Joined channel: ${normalizedChannel}`);
     } catch (error) {
-      logger.error(`Failed to join channel ${channel}:`, error);
-      throw error;
+      logger.error(`Error joining channel ${normalizedChannel}:`, error);
     }
   }
 
@@ -202,26 +222,151 @@ export default class TwitchEventManager extends EventEmitter {
       logger.info('Starting TwitchEventManager initialization...');
       this.setupEventHandlers();
 
-      // Debug channels before joining
-      logger.debug(`Channels before joining: ${Array.from(this.channels).join(', ')}`);
+      // Get current channels from chatClient
+      const currentChannels = (this.chatClient.channels || [])
+        .map(ch => ch.replace(/^#/, ''));
+      
+      // Filter out channels we're already in
+      const channelsToJoin = [...this.channels].filter(ch => 
+        !currentChannels.includes(ch.toLowerCase())
+      );
 
-      // Join initial channels
-      for (const channel of this.channels) {
+      logger.debug(`Current channels: ${currentChannels.join(', ')}`);
+      logger.debug(`Channels to join: ${channelsToJoin.join(', ')}`);
+
+      // Join only new channels
+      for (const channel of channelsToJoin) {
         try {
-          logger.debug(`Attempting to join channel: ${channel}`);
           await this.joinChannel(channel);
-          logger.info(`Successfully joined channel: ${channel}`);
-          this.emit('channelJoined', channel);
+          // Add small delay between joins to prevent rate limiting
+          await new Promise(resolve => setTimeout(resolve, 100));
         } catch (error) {
-          logger.error(`Failed to join initial channel ${channel}:`, error);
+          logger.error(`Failed to join channel ${channel}:`, error);
         }
       }
 
-      // Debug final channel state
-      logger.debug(`Final channel state: ${Array.from(this.channels).join(', ')}`);
+      // Start stream monitoring
+      this.startStreamMonitoring();
     } catch (error) {
       logger.error('Error initializing TwitchEventManager:', error);
       throw error;
+    }
+  }
+
+  async startStreamMonitoring() {
+    // Check streams every minute
+    setInterval(async () => {
+      for (const channel of this.channels) {
+        try {
+          await this.checkStreamStatus(channel);
+        } catch (error) {
+          logger.error(`Error checking stream status for ${channel}:`, error);
+        }
+      }
+    }, 60000); // Check every minute
+  }
+
+  async checkStreamStatus(channel) {
+    try {
+      const isLive = await this.isChannelLive(channel);
+      const lastAnalysis = this.lastStreamAnalysis.get(channel) || 0;
+      const now = Date.now();
+
+      if (isLive) {
+        // Stream is live
+        if (now - lastAnalysis >= this.streamAnalysisInterval) {
+          const user = await this.apiClient.users.getUserByName(channel);
+          const stream = await this.apiClient.streams.getStreamByUserId(user.id);
+          await this.analyzeStream(channel, stream);
+          this.lastStreamAnalysis.set(channel, now);
+        }
+      } else {
+        // Stream is offline, reset analysis timer
+        this.lastStreamAnalysis.delete(channel);
+      }
+    } catch (error) {
+      logger.error(`Error checking stream for ${channel}:`, error);
+    }
+  }
+
+  async analyzeStream(channel, stream) {
+    try {
+      const streamData = {
+        title: stream.title,
+        game: stream.gameName,
+        startTime: stream.startDate,
+        thumbnailUrl: stream.thumbnailUrl
+          .replace('{width}', '1280')
+          .replace('{height}', '720')
+      };
+
+      // Generate analysis prompt without viewer count
+      const prompt = `Analyze this Twitch stream:
+        Channel: ${channel}
+        Title: ${streamData.title}
+        Game: ${streamData.game}
+        Uptime: ${this.getStreamUptime(streamData.startTime)}
+        
+        Generate a casual, friendly comment about the stream as if you're talking to the broadcaster.
+        Reference specific details about what they're doing in the game or stream.
+        Keep it natural and chat-friendly, using appropriate 7TV emotes.`;
+
+      // Use Claude to analyze if handler is available
+      if (this.claudeHandler?.anthropic) {
+        const response = await this.claudeHandler.anthropic.messages.create({
+          model: "claude-3-sonnet-20240229",
+          max_tokens: 100,
+          temperature: 0.8,
+          system: `You are Luna, a Twitch chatbot casually commenting on a stream. Keep responses natural and chat-friendly. Use appropriate 7TV emotes.`,
+          messages: [
+            {
+              role: "user",
+              content: prompt
+            }
+          ]
+        });
+
+        const comment = response.content[0].text;
+        
+        // Send the comment to chat
+        await this.chatClient.say(channel, `@${channel} ${comment}`);
+        logger.info(`Sent stream analysis comment in ${channel}: ${comment}`);
+      }
+    } catch (error) {
+      logger.error(`Error analyzing stream for ${channel}:`, error);
+    }
+  }
+
+  getStreamUptime(startTime) {
+    const duration = Date.now() - new Date(startTime).getTime();
+    const hours = Math.floor(duration / (1000 * 60 * 60));
+    const minutes = Math.floor((duration % (1000 * 60 * 60)) / (1000 * 60));
+    return `${hours}h ${minutes}m`;
+  }
+
+  // Add this method to the TwitchEventManager class
+  async isChannelLive(channel) {
+    try {
+      // Remove # if present and convert to lowercase
+      const channelName = channel.replace(/^#/, '').toLowerCase();
+      
+      // Get user info
+      const user = await this.apiClient.users.getUserByName(channelName);
+      if (!user) {
+        logger.debug(`Channel ${channelName} not found`);
+        return false;
+      }
+
+      // Check stream status
+      const stream = await this.apiClient.streams.getStreamByUserId(user.id);
+      
+      // Debug logging
+      logger.debug(`Stream status for ${channelName}: ${stream ? 'live' : 'offline'}`);
+      
+      return !!stream; // Returns true if stream exists, false otherwise
+    } catch (error) {
+      logger.error(`Error checking live status for ${channel}:`, error);
+      return false; // Return false on error
     }
   }
 }

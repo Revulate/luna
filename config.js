@@ -34,7 +34,7 @@ export const config = {
     twitch: {
         clientId: process.env.TWITCH_CLIENT_ID,
         clientSecret: process.env.TWITCH_CLIENT_SECRET,
-        botUsername: process.env.TWITCH_BOT_USERNAME,
+        botUsername: process.env.BOT_NICK || 'TatsLuna', // Use BOT_NICK instead
         channels: parseChannels(process.env.TWITCH_CHANNELS),
         broadcasterUserId: requireEnv('BROADCASTER_USER_ID'),
         redirectUri: requireEnv('TWITCH_REDIRECT_URI'),
@@ -88,5 +88,15 @@ export const config = {
     webPanel: {
         port: process.env.WEB_PANEL_PORT || 3069,
         password: process.env.WEB_PANEL_PASSWORD || 'changeme' // Make sure to set this in .env
+    },
+    anthropic: {
+        apiKey: (() => {
+            const key = process.env.ANTHROPIC_API_KEY;
+            if (!key) {
+                logger.error('Missing ANTHROPIC_API_KEY in environment variables');
+                throw new Error('Missing ANTHROPIC_API_KEY');
+            }
+            return key;
+        })()
     }
 };
