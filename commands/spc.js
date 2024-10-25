@@ -6,6 +6,7 @@ import { setTimeout as setTimeoutPromise } from 'timers/promises';
 import jsonStream from 'jsonstream/index.js';
 import { pipeline } from 'stream/promises';
 import path from 'path';
+import * as fuzzball from 'fuzzball';
 
 class Spc {
   constructor(bot) {
@@ -28,6 +29,103 @@ class Spc {
     this.db = null;
     this.dbConnection = null;
     this.FETCH_INTERVAL = 3 * 24 * 60 * 60 * 1000; // 3 days in milliseconds
+    this.textVariations = {
+      // Roman numerals
+      'i': '1',
+      'ii': '2',
+      'iii': '3',
+      'iv': '4',
+      'v': '5',
+      'vi': '6',
+      'vii': '7',
+      'viii': '8',
+      'ix': '9',
+      'x': '10',
+      // Common variations
+      '&': 'and',
+      '+': 'plus',
+      // Common abbreviations
+      'ff': 'final fantasy',
+      'ff7': 'final fantasy vii',
+      'ffvii': 'final fantasy vii',
+      'ff 7': 'final fantasy vii',
+      'gta': 'grand theft auto',
+      'cod': 'call of duty',
+      'ac': "assassin's creed",
+      'dmc': 'devil may cry',
+      'tlou': 'the last of us',
+      'botw': 'breath of the wild',
+      'totk': 'tears of the kingdom',
+      'dbd': 'dead by daylight',
+      'btd': 'bloons td',
+      'btd6': 'bloons td 6',
+      'ds': 'dark souls',
+      'ds3': 'dark souls 3',
+      'er': 'elden ring',
+      'p5': 'persona 5',
+      'p5r': 'persona 5 royal',
+      'mhw': 'monster hunter world',
+      'rdr2': 'red dead redemption 2',
+      // Common typos or variations
+      'witcher': 'the witcher',
+      'scrolls': 'the elder scrolls',
+      'souls': 'dark souls',
+      'd4': 'diablo 4',
+      'd3': 'diablo 3',
+      'd2': 'destiny 2',  // Changed from 'diablo 2' to 'destiny 2'
+      'diablo': 'diablo',
+      'destiny': 'destiny'
+    };
+    this.gamePatterns = {
+      'divinity 2': 'divinity original sin 2',
+      'divinity ii': 'divinity original sin 2',
+      'dos2': 'divinity original sin 2',
+      'ff7r': 'final fantasy vii remake',
+      'ff7 r': 'final fantasy vii remake',
+      'ff 7 r': 'final fantasy vii remake',
+      'ff7 remake': 'final fantasy vii remake',
+      'ff 7 remake': 'final fantasy vii remake',
+      'ffvii remake': 'final fantasy vii remake',
+      'ff vii remake': 'final fantasy vii remake',
+      'final fantasy 7 remake': 'final fantasy vii remake',
+      'final fantasy vii remake': 'final fantasy vii remake',
+      'ff7rb': 'final fantasy vii rebirth',
+      'ff7 rebirth': 'final fantasy vii rebirth',
+      'ff 7 rebirth': 'final fantasy vii rebirth',
+      'ffvii rebirth': 'final fantasy vii rebirth',
+      'ff vii rebirth': 'final fantasy vii rebirth',
+      'persona5': 'persona 5',
+      'p5r': 'persona 5 royal',
+      'mgs': 'metal gear solid',
+      'dmc': 'devil may cry',
+      're': 'resident evil',
+      'yakuza 0': 'yakuza zero',
+      'nier': 'nier automata',
+      'borderlands 3': 'borderlands iii',
+      'borderlands 2': 'borderlands ii',
+      'mass effect': 'mass effect legendary edition',
+      'me1': 'mass effect legendary edition',
+      'me2': 'mass effect 2',
+      'me3': 'mass effect 3',
+      'dbd': 'dead by daylight',
+      'bloons': 'bloons td',
+      'btd': 'bloons td',
+      'd4': 'diablo iv',
+      'diablo 4': 'diablo iv',
+      'diablo four': 'diablo iv',
+      'diablo iv': 'diablo iv',
+      'd3': 'diablo iii',
+      'diablo 3': 'diablo iii',
+      'diablo three': 'diablo iii',
+      'diablo iii': 'diablo iii',
+      'd2': 'destiny 2',
+      'destiny2': 'destiny 2',
+      'destiny 2': 'destiny 2',
+      'destiny two': 'destiny 2',
+      'diablo 2': 'diablo ii',
+      'diablo two': 'diablo ii',
+      'diablo ii': 'diablo ii'
+    };
   }
 
   async initialize() {
@@ -70,7 +168,14 @@ class Spc {
   async _prepareStatements() {
     this.preparedStatements = {
       insertGame: this.db.prepare('INSERT OR REPLACE INTO Steam_Game (ID, Name, LastUpdated) VALUES (?, ?, ?)'),
-      findGameByName: this.db.prepare('SELECT ID, Name FROM Steam_Game WHERE Name LIKE ?'),
+      // Update the findGameByName query to be more flexible
+      findGameByName: this.db.prepare(`
+        SELECT ID, Name 
+        FROM Steam_Game 
+        WHERE LOWER(Name) LIKE LOWER(?)
+        OR LOWER(Name) LIKE LOWER(?)
+        OR LOWER(Name) LIKE LOWER(?)
+      `),
       getAllGames: this.db.prepare('SELECT name, image_url FROM games WHERE image_url IS NOT NULL'),
       getLastFetch: this.db.prepare('SELECT timestamp FROM last_fetch WHERE id = 1'),
       updateLastFetch: this.db.prepare('INSERT OR REPLACE INTO last_fetch (id, timestamp) VALUES (1, ?)'),
@@ -170,19 +275,19 @@ class Spc {
     transaction(games);
   }
 
-  async handleSpcCommand({ channel, user, args, bot }) {
+  async handleSpcCommand({ channel, user, args, say }) {
     const username = user.username || user.name || user['display-name'] || 'Unknown User';
     const userId = user.userId || user.id || 'Unknown ID';
     this.logger.info(`[MESSAGE] Processing #spc command from ${username} (ID: ${userId})`);
 
     if (!this.steamApiKey) {
-      await bot.say(channel, `@${username}, Steam API key is not configured.`);
+      await say(`@${username}, Steam API key is not configured.`);
       return;
     }
 
     const { gameID, skipReviews, gameName } = this.parseArguments(args);
     if (gameID === null && gameName === null) {
-      await bot.say(channel, `@${username}, please provide a game ID or name.`);
+      await say(`@${username}, please provide a game ID or name.`);
       return;
     }
 
@@ -190,7 +295,7 @@ class Spc {
     if (!finalGameID && gameName) {
       finalGameID = await this.findGameIdByName(gameName);
       if (!finalGameID) {
-        await bot.say(channel, `@${username}, no games found for your query: '${gameName}'.`);
+        await say(`@${username}, no games found for your query: '${gameName}'.`);
         return;
       }
       this.logger.debug(`Game name provided. Found Game ID: ${finalGameID}`);
@@ -199,7 +304,7 @@ class Spc {
     try {
       const playerCount = await this.getCurrentPlayerCount(finalGameID);
       if (!playerCount) {
-        await bot.say(channel, 
+        await say(
           `@${username}, could not retrieve player count for ${gameName}.`
         );
         return;
@@ -208,7 +313,7 @@ class Spc {
       const reviewsString = skipReviews ? "" : await this.getGameReviews(finalGameID);
       const gameDetails = await this.getGameDetails(finalGameID);
       if (!gameDetails) {
-        await bot.say(channel, `@${username}, could not retrieve details for game ID ${finalGameID}.`);
+        await say(`@${username}, could not retrieve details for game ID ${finalGameID}.`);
         return;
       }
 
@@ -219,10 +324,10 @@ class Spc {
         reply += ` ${reviewsString}`;
       }
 
-      await bot.say(channel, reply);
+      await say(reply);
     } catch (error) {
       logger.error(`Error in SPC command: ${error}`);
-      await this.bot.say(channel, 
+      await say(
         `@${username}, an error occurred while fetching player count.`
       );
     }
@@ -255,28 +360,87 @@ class Spc {
 
   async findGameIdByName(gameName) {
     this.logger.info(`Searching for game by name: ${gameName}`);
-    const lowerGameName = gameName.toLowerCase();
+    const normalizedGameName = this.normalizeGameName(gameName);
+    const lowerGameName = normalizedGameName.toLowerCase();
+    
+    this.logger.debug(`Normalized game name: ${normalizedGameName}`);
+    
+    // First check cache
     if (this.gameCache.has(lowerGameName)) {
       return this.gameCache.get(lowerGameName);
     }
 
     try {
-      const games = await this.preparedStatements.findGameByName.all(`%${gameName}%`);
+      // Create different search patterns
+      const exactPattern = normalizedGameName;
+      const containsPattern = `%${normalizedGameName}%`;
+      const wordsPattern = `%${normalizedGameName.split(' ').join('%')}%`;
+      const loosePattern = `%${normalizedGameName.replace(/\s+/g, '%')}%`;
 
+      // Get all potential matches from database
+      const games = this.preparedStatements.findGameByName.all(
+        exactPattern,
+        wordsPattern,
+        loosePattern
+      );
+      
+      this.logger.debug(`Found ${games.length} potential matches for "${normalizedGameName}"`);
+      
       if (games.length === 0) return null;
 
-      const bestMatch = this._findBestMatch(gameName, games);
+      // Create normalized versions of all game names for comparison
+      const normalizedGames = games.map(g => ({
+        ...g,
+        normalizedName: this.normalizeGameName(g.Name)
+      }));
 
-      if (bestMatch) {
-        this._updateGameCache(lowerGameName, bestMatch.ID);
-        this.logger.debug(`Fuzzy match found: '${bestMatch.Name}' with App ID ${bestMatch.ID}`);
-        return bestMatch.ID;
+      // First try token_set_ratio for best partial matching
+      const matches = fuzzball.extract(normalizedGameName, normalizedGames.map(g => g.normalizedName), {
+        scorer: fuzzball.token_set_ratio,
+        limit: 3,
+        cutoff: 45  // Lower cutoff for initial matching
+      });
+
+      this.logger.debug(`Fuzzy matches for "${normalizedGameName}": ${JSON.stringify(matches)}`);
+
+      // If we have matches, try to find the best one
+      if (matches.length > 0) {
+        // Sort matches by score descending
+        matches.sort((a, b) => b[1] - a[1]);
+        const [bestMatchName, bestScore] = matches[0];
+
+        // If we have a very good match (score >= 75), use it directly
+        if (bestScore >= 75) {
+          const bestMatch = normalizedGames.find(g => this.normalizeGameName(g.Name) === bestMatchName);
+          this._updateGameCache(lowerGameName, bestMatch.ID);
+          this.logger.debug(`Found strong match: '${bestMatch.Name}' with App ID ${bestMatch.ID}`);
+          return bestMatch.ID;
+        }
+
+        // If we have multiple decent matches (score >= 55), suggest them
+        if (bestScore >= 55) {
+          const suggestions = matches
+            .filter(([_, score]) => score >= 55)
+            .map(([normalizedName]) => {
+              const game = normalizedGames.find(g => this.normalizeGameName(g.Name) === normalizedName);
+              return game.Name;
+            });
+          throw {
+            type: 'SUGGESTIONS',
+            suggestions,
+            message: `Did you mean one of these: ${suggestions.join(', ')}?`
+          };
+        }
       }
+
     } catch (error) {
+      if (error.type === 'SUGGESTIONS') {
+        throw error; // Re-throw suggestion errors
+      }
       this.logger.error(`Error during game search: ${error}`, error);
     }
 
-    this.logger.info(`No suitable fuzzy match found for game name: ${gameName}`);
+    this.logger.info(`No suitable match found for game name: ${gameName}`);
     return null;
   }
 
@@ -453,6 +617,71 @@ class Spc {
       await this.db.close();
       this.logger.info("Database connection closed.");
     }
+  }
+
+  normalizeGameName(gameName) {
+    let normalized = gameName.toLowerCase().trim();
+    
+    // Check for direct pattern matches first
+    if (this.gamePatterns[normalized]) {
+      return this.gamePatterns[normalized];
+    }
+    
+    // Handle FF7 variations with special cases
+    const ff7Pattern = /^(ff|final fantasy)\s*(7|vii)\s*(r|remake|rb|rebirth)?$/i;
+    const match = normalized.match(ff7Pattern);
+    
+    if (match) {
+      const [_, prefix, number, suffix] = match;
+      if (suffix) {
+        const isSuffixRemake = suffix.toLowerCase().startsWith('r') || suffix.toLowerCase() === 'remake';
+        return isSuffixRemake ? 'final fantasy vii remake' : 'final fantasy vii rebirth';
+      }
+      return 'final fantasy vii';
+    }
+    
+    // Replace roman numerals and other variations
+    const words = normalized.split(' ');
+    const normalizedWords = words.map(word => {
+      return this.textVariations[word] || word;
+    });
+    
+    normalized = normalizedWords.join(' ');
+
+    // Handle special cases with numbers
+    normalized = normalized.replace(/(\d+)(st|nd|rd|th)/, '$1');
+    
+    // Remove common suffixes
+    const suffixesToRemove = [
+      'definitive edition',
+      'game of the year edition',
+      'goty',
+      'remastered',
+      'enhanced edition',
+      'directors cut',
+      'complete edition'
+    ];
+    
+    for (const suffix of suffixesToRemove) {
+      if (normalized.endsWith(suffix)) {
+        normalized = normalized.slice(0, -suffix.length).trim();
+      }
+    }
+    
+    // Standardize separators and remove special characters
+    normalized = normalized
+      .replace(/[-_:]/g, ' ')
+      .replace(/[^\w\s]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    
+    // Handle common words that might be optional
+    const optionalWords = ['the', 'a', 'an', 'and', 'or', 'of'];
+    normalized = normalized.split(' ')
+      .filter(word => !optionalWords.includes(word))
+      .join(' ');
+    
+    return normalized;
   }
 }
 
