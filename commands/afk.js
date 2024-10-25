@@ -2,6 +2,7 @@ import { runQuery, getQuery, allQuery } from '../database.js';
 import logger from '../logger.js';
 import Database from 'better-sqlite3';
 import path from 'path';
+import MessageLogger from '../MessageLogger.js';
 
 class AFK {
   constructor(chatClient) {
@@ -47,7 +48,6 @@ class AFK {
       return;
     }
 
-    // Fix user ID extraction from Twurple context
     const userId = user.id || user.userId || context.rawMessage?.userInfo?.userId;
     const username = user.username || user.name || user.displayName;
 
@@ -62,10 +62,26 @@ class AFK {
       // First check if user is already AFK
       const existingAfk = this.statements.getActiveAfk.get(userId, cleanChannel);
       if (existingAfk) {
-        await context.say(`@${username}, you are already AFK: ${existingAfk.reason}`);
-        return;
+        const returnTime = Math.floor(Date.now() / 1000);
+        const duration = this.formatDurationString(returnTime - existingAfk.afk_time);
+
+        // Clear AFK status directly here
+        this.statements.updateAfk.run(returnTime, userId, cleanChannel);
+        const userKey = this.getUserKey(userId, cleanChannel);
+        this.currentlyAfkUsers.delete(userKey);
+
+        const storedReason = existingAfk.reason;
+        const hasCustomReason = storedReason.includes('•');
+        const response = hasCustomReason 
+          ? `@${username} is no longer ${storedReason} (was away for ${duration})`
+          : `@${username} is no longer ${storedReason} (was away for ${duration})`;
+
+        await MessageLogger.logBotMessage(channel, response);
+        await context.say(response);
+        return; // Return early to prevent setting new AFK status
       }
 
+      // If not already AFK, set new AFK status
       const emoji = this.reasonEmojis[command];
       const baseReason = this.statusMessages[command] || 'AFK';
       const reason = args.length > 0 ? args.join(' ') : '';
@@ -95,9 +111,14 @@ class AFK {
         active: 1
       });
 
-      await context.say(`@${username} is now ${fullReason}`);
+      const response = `@${username} is now ${fullReason}`;
+      await MessageLogger.logBotMessage(channel, response);
+      await context.say(response);
     } catch (error) {
       logger.error(`Error in AFK command: ${error}`);
+      const errorResponse = `@${username}, an error occurred while setting your AFK status.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
       await this.clearAfkStatus(userId, cleanChannel);
     }
   }
@@ -108,12 +129,12 @@ class AFK {
       return;
     }
 
-    // Ensure user ID is available
     const userId = context.user?.userId || context.rawMessage?.userInfo?.userId;
     if (!userId) {
       logger.error('No user ID found in context:', { user: context.user });
-      await this.chatClient.say(context.channel, 
-        `@${context.user.username}, an error occurred: User ID is missing.`);
+      const errorResponse = `@${context.user.username}, an error occurred: User ID is missing.`;
+      await MessageLogger.logBotMessage(context.channel, errorResponse);
+      await context.say(errorResponse);
       return;
     }
 
@@ -125,8 +146,9 @@ class AFK {
       const recentAfk = this.statements.getRecentAfk.get(userId, cleanChannel, cutoffTime);
       
       if (!recentAfk) {
-        await this.chatClient.say(context.channel, 
-          `@${context.user.username}, you don't have any recent AFK status to resume.`);
+        const response = `@${context.user.username}, you don't have any recent AFK status to resume.`;
+        await MessageLogger.logBotMessage(context.channel, response);
+        await context.say(response);
         return;
       }
 
@@ -135,16 +157,13 @@ class AFK {
       
       // Begin transaction
       this.db.transaction(() => {
-        // Delete any existing AFK status first
         this.statements.deleteAfk.run(userId, cleanChannel);
-
-        // Insert new AFK status with the previous reason
         this.statements.insertAfk.run(
           userId,
           cleanChannel,
           context.user.username,
           timestamp,
-          recentAfk.reason // Use the original reason without modification
+          recentAfk.reason
         );
       })();
 
@@ -159,11 +178,14 @@ class AFK {
         active: 1
       });
 
-      await this.chatClient.say(context.channel, `@${context.user.username} is now ${recentAfk.reason}`);
+      const response = `@${context.user.username} is now ${recentAfk.reason}`;
+      await MessageLogger.logBotMessage(context.channel, response);
+      await context.say(response);
     } catch (error) {
       logger.error('Error in RAFK command:', error);
-      await this.chatClient.say(context.channel, 
-        `@${context.user.username}, an error occurred while processing your command.`);
+      const errorResponse = `@${context.user.username}, an error occurred while processing your command.`;
+      await MessageLogger.logBotMessage(context.channel, errorResponse);
+      await context.say(errorResponse);
     }
   }
 
@@ -273,12 +295,24 @@ class AFK {
         `)
       };
 
-      // Set up message handler using Twurple's chat client
+      // Modified message handler
       if (this.chatClient) {
         this.chatClient.onMessage(async (channel, user, message, msg) => {
-          if (!message.startsWith('#')) {
-            await this.handleUserMessage(channel, user, message, msg);
+          // Skip message handling if it's an AFK command - let the command handler deal with it
+          if (message.toLowerCase().startsWith('#afk') || 
+              message.toLowerCase().startsWith('#sleep') ||
+              message.toLowerCase().startsWith('#gn') ||
+              message.toLowerCase().startsWith('#work') ||
+              message.toLowerCase().startsWith('#food') ||
+              message.toLowerCase().startsWith('#gaming') ||
+              message.toLowerCase().startsWith('#bed') ||
+              message.toLowerCase().startsWith('#eating') ||
+              message.toLowerCase().startsWith('#working') ||
+              message.toLowerCase().startsWith('#bedge') ||
+              message.toLowerCase().startsWith('#rafk')) {
+            return;
           }
+          await this.handleUserMessage(channel, user, message, msg);
         });
       }
 
@@ -290,7 +324,7 @@ class AFK {
     }
   }
 
-  async handleUserMessage(channel, user, message, msg) {
+  async handleUserMessage(channel, user, message, msg, context = null) {
     if (!this.initialized || !msg.userInfo) return;
 
     try {
@@ -313,13 +347,30 @@ class AFK {
         // Extract base status from the stored reason
         const storedReason = activeAfk.reason;
         const hasCustomReason = storedReason.includes('•');
-        const returnMessage = hasCustomReason 
+        const response = hasCustomReason 
           ? `@${user} is no longer ${storedReason} (was away for ${duration})`
           : `@${user} is no longer ${storedReason} (was away for ${duration})`;
 
-        await this.chatClient.say(channel, returnMessage);
+        await MessageLogger.logBotMessage(channel, response);
+        if (context) {
+          await context.say(response);
+        } else {
+          await this.chatClient.say(channel, response);
+        }
+
+        // If this was triggered by an AFK command, prevent further processing
+        if (message.toLowerCase().startsWith('#afk') || 
+            message.toLowerCase().startsWith('#sleep') ||
+            message.toLowerCase().startsWith('#gn') ||
+            // ... add other AFK command variants
+            message.toLowerCase().startsWith('#bedge')) {
+          throw new Error('SKIP_PROCESSING');
+        }
       }
     } catch (error) {
+      if (error.message === 'SKIP_PROCESSING') {
+        return; // Silently exit if we're skipping further processing
+      }
       logger.error(`Error handling message for AFK: ${error}`);
     }
   }
