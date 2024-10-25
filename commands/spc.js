@@ -318,11 +318,15 @@ class Spc {
       }
 
       const steamUrl = `https://store.steampowered.com/app/${finalGameID}`;
-      let reply = `${gameDetails.name} (by ${gameDetails.developers.join(', ')}) currently has **${playerCount}** players in-game.`;
-      reply += ` Steam URL: ${steamUrl}`;
-      if (reviewsString) {
-        reply += ` ${reviewsString}`;
+      let reply = `${gameDetails.name} (by ${gameDetails.developer}) • Current Players: ${playerCount.toLocaleString()}`;
+      if (gameDetails.price && gameDetails.price !== "N/A") {
+        reply += ` • ${gameDetails.price}`;
+        if (gameDetails.discount) reply += ` (${gameDetails.discount})`;
       }
+      if (reviewsString) reply += ` • ${reviewsString}`;
+      if (gameDetails.genres) reply += ` • Genres: ${gameDetails.genres}`;
+      if (gameDetails.multiplayer) reply += ` • Multiplayer`;
+      reply += ` • Steam URL: ${steamUrl}`;
 
       await say(reply);
     } catch (error) {
@@ -363,85 +367,204 @@ class Spc {
     const normalizedGameName = this.normalizeGameName(gameName);
     const lowerGameName = normalizedGameName.toLowerCase();
     
-    this.logger.debug(`Normalized game name: ${normalizedGameName}`);
-    
     // First check cache
     if (this.gameCache.has(lowerGameName)) {
-      return this.gameCache.get(lowerGameName);
+        return this.gameCache.get(lowerGameName);
     }
 
     try {
-      // Create different search patterns
-      const exactPattern = normalizedGameName;
-      const containsPattern = `%${normalizedGameName}%`;
-      const wordsPattern = `%${normalizedGameName.split(' ').join('%')}%`;
-      const loosePattern = `%${normalizedGameName.replace(/\s+/g, '%')}%`;
+        // First try exact matches with common variations
+        const commonVariations = {
+            // GTA variations
+            'gta 5': 'grand theft auto v',
+            'gta v': 'grand theft auto v',
+            'gta5': 'grand theft auto v',
+            'gtav': 'grand theft auto v',
+            // Diablo variations
+            'd4': 'diablo iv',
+            'd 4': 'diablo iv',
+            'diablo 4': 'diablo iv',
+            'diablo four': 'diablo iv',
+            'diablo iv': 'diablo iv',
+            // Final Fantasy variations
+            'ff7': 'final fantasy vii',
+            'ff 7': 'final fantasy vii',
+            'ffvii': 'final fantasy vii',
+            'ff vii': 'final fantasy vii',
+            'ff7r': 'final fantasy vii remake',
+            'ff7 remake': 'final fantasy vii remake',
+            'ff 7 remake': 'final fantasy vii remake',
+            'ffvii remake': 'final fantasy vii remake',
+            'ff vii remake': 'final fantasy vii remake',
+            // Destiny variations
+            'd2': 'destiny 2',
+            'destiny2': 'destiny 2',
+            'destiny 2': 'destiny 2'
+        };
 
-      // Get all potential matches from database
-      const games = this.preparedStatements.findGameByName.all(
-        exactPattern,
-        wordsPattern,
-        loosePattern
-      );
-      
-      this.logger.debug(`Found ${games.length} potential matches for "${normalizedGameName}"`);
-      
-      if (games.length === 0) return null;
-
-      // Create normalized versions of all game names for comparison
-      const normalizedGames = games.map(g => ({
-        ...g,
-        normalizedName: this.normalizeGameName(g.Name)
-      }));
-
-      // First try token_set_ratio for best partial matching
-      const matches = fuzzball.extract(normalizedGameName, normalizedGames.map(g => g.normalizedName), {
-        scorer: fuzzball.token_set_ratio,
-        limit: 3,
-        cutoff: 45  // Lower cutoff for initial matching
-      });
-
-      this.logger.debug(`Fuzzy matches for "${normalizedGameName}": ${JSON.stringify(matches)}`);
-
-      // If we have matches, try to find the best one
-      if (matches.length > 0) {
-        // Sort matches by score descending
-        matches.sort((a, b) => b[1] - a[1]);
-        const [bestMatchName, bestScore] = matches[0];
-
-        // If we have a very good match (score >= 75), use it directly
-        if (bestScore >= 75) {
-          const bestMatch = normalizedGames.find(g => this.normalizeGameName(g.Name) === bestMatchName);
-          this._updateGameCache(lowerGameName, bestMatch.ID);
-          this.logger.debug(`Found strong match: '${bestMatch.Name}' with App ID ${bestMatch.ID}`);
-          return bestMatch.ID;
+        // Try exact variation match first
+        const variationMatch = commonVariations[lowerGameName];
+        if (variationMatch) {
+            const exactMatches = this.preparedStatements.findGameByName.all(
+                variationMatch,
+                `%${variationMatch}%`,
+                variationMatch.replace(/\s+/g, '%')
+            );
+            if (exactMatches.length > 0) {
+                const match = exactMatches[0];
+                this._updateGameCache(lowerGameName, match.ID);
+                return match.ID;
+            }
         }
 
-        // If we have multiple decent matches (score >= 55), suggest them
-        if (bestScore >= 55) {
-          const suggestions = matches
-            .filter(([_, score]) => score >= 55)
-            .map(([normalizedName]) => {
-              const game = normalizedGames.find(g => this.normalizeGameName(g.Name) === normalizedName);
-              return game.Name;
-            });
-          throw {
-            type: 'SUGGESTIONS',
-            suggestions,
-            message: `Did you mean one of these: ${suggestions.join(', ')}?`
-          };
-        }
-      }
+        // Get all potential matches from database
+        const searchPatterns = [
+            normalizedGameName,
+            `%${normalizedGameName}%`,
+            normalizedGameName.replace(/\s+/g, '%')
+        ];
 
+        let games = [];
+        for (const pattern of searchPatterns) {
+            const results = this.preparedStatements.findGameByName.all(
+                pattern,
+                pattern,
+                pattern
+            );
+            games.push(...results);
+        }
+
+        // Remove duplicates
+        games = [...new Map(games.map(game => [game.ID, game])).values()];
+
+        if (games.length === 0) return null;
+
+        // Score matches using multiple strategies from fuzzball
+        const matches = games.map(game => {
+            const gameName = game.Name.toLowerCase();
+            const normalizedGameTitle = this.normalizeGameName(game.Name);
+
+            return {
+                game,
+                scores: {
+                    // Basic ratio for exact character matching
+                    ratio: fuzzball.ratio(normalizedGameName, normalizedGameTitle),
+                    // Partial ratio for substring matching
+                    partial: fuzzball.partial_ratio(normalizedGameName, normalizedGameTitle),
+                    // Token sort for word order independence
+                    tokenSort: fuzzball.token_sort_ratio(normalizedGameName, normalizedGameTitle),
+                    // Token set for handling extra/missing words
+                    tokenSet: fuzzball.token_set_ratio(normalizedGameName, normalizedGameTitle),
+                    // Token similarity for better abbreviation handling
+                    tokenSimilarity: fuzzball.token_similarity_sort_ratio(normalizedGameName, normalizedGameTitle, {
+                        sortBySimilarity: true
+                    }),
+                    // Exact match bonus
+                    exact: gameName === lowerGameName ? 100 : 0
+                }
+            };
+        });
+
+        // Calculate weighted scores
+        matches.forEach(match => {
+            match.totalScore = (
+                (match.scores.ratio * 0.2) +
+                (match.scores.partial * 0.2) +
+                (match.scores.tokenSort * 0.2) +
+                (match.scores.tokenSet * 0.2) +
+                (match.scores.tokenSimilarity * 0.1) +
+                (match.scores.exact * 0.1)
+            );
+        });
+
+        // Sort by total score
+        matches.sort((a, b) => b.totalScore - a.totalScore);
+
+        // Log top matches for debugging
+        this.logger.debug(`Top matches for "${normalizedGameName}":`, 
+            matches.slice(0, 3).map(m => ({
+                name: m.game.Name,
+                score: m.totalScore,
+                scores: m.scores
+            }))
+        );
+
+        // Return best match if score is high enough
+        if (matches[0].totalScore >= 75) {
+            const bestMatch = matches[0].game;
+            this._updateGameCache(lowerGameName, bestMatch.ID);
+            return bestMatch.ID;
+        }
+
+        return null;
     } catch (error) {
-      if (error.type === 'SUGGESTIONS') {
-        throw error; // Re-throw suggestion errors
-      }
-      this.logger.error(`Error during game search: ${error}`, error);
+        this.logger.error(`Error during game search: ${error}`);
+        return null;
+    }
+  }
+
+  // Helper method to convert roman numerals
+  romanToArabic(roman) {
+    const romanNumerals = {
+        'i': 1,
+        'iv': 4,
+        'v': 5,
+        'ix': 9,
+        'x': 10,
+        'xl': 40,
+        'l': 50,
+        'xc': 90,
+        'c': 100,
+        'cd': 400,
+        'd': 500,
+        'cm': 900,
+        'm': 1000
+    };
+
+    let result = 0;
+    let input = roman.toLowerCase();
+
+    for (let i = 0; i < input.length; i++) {
+        const current = romanNumerals[input[i]];
+        const next = romanNumerals[input[i + 1]];
+
+        if (next && current < next) {
+            result += next - current;
+            i++;
+        } else {
+            result += current;
+        }
     }
 
-    this.logger.info(`No suitable match found for game name: ${gameName}`);
-    return null;
+    return result;
+  }
+
+  // Helper method to convert arabic to roman
+  arabicToRoman(num) {
+    const romanNumerals = [
+        ['m', 1000],
+        ['cm', 900],
+        ['d', 500],
+        ['cd', 400],
+        ['c', 100],
+        ['xc', 90],
+        ['l', 50],
+        ['xl', 40],
+        ['x', 10],
+        ['ix', 9],
+        ['v', 5],
+        ['iv', 4],
+        ['i', 1]
+    ];
+
+    let result = '';
+    for (const [roman, value] of romanNumerals) {
+        while (num >= value) {
+            result += roman;
+            num -= value;
+        }
+    }
+    return result;
   }
 
   _findBestMatch(gameName, games) {
@@ -578,7 +701,26 @@ class Spc {
       const gameData = data[appId].data;
       const details = {
         name: gameData.name || "Unknown",
-        developers: gameData.developers || []
+        developers: gameData.developers || [],
+        // Add price information
+        price: gameData.is_free ? "Free to Play" : 
+               gameData.price_overview ? `${gameData.price_overview.final_formatted}` : "N/A",
+        // Add if game is on sale
+        discount: gameData.price_overview?.discount_percent > 0 ? 
+                 `${gameData.price_overview.discount_percent}% OFF` : null,
+        // Add to getGameDetails method
+        genres: gameData.genres?.map(g => g.description).join(', ') || "N/A",
+        categories: gameData.categories?.map(c => c.description).join(', ') || "N/A",
+        // Add multiplayer/singleplayer status
+        multiplayer: gameData.categories?.some(c => 
+            c.description.includes("Multi-player") || 
+            c.description.includes("Co-op")
+        ),
+        minRequirements: gameData.pc_requirements?.minimum || "N/A",
+        recommendedRequirements: gameData.pc_requirements?.recommended || "N/A",
+        releaseDate: gameData.release_date?.date || "N/A",
+        publisher: gameData.publishers?.[0] || "N/A",
+        developer: gameData.developers?.[0] || "N/A"
       };
 
       this.gameDetailsCache.set(appId, { details, timestamp: Date.now() });
@@ -622,66 +764,103 @@ class Spc {
   normalizeGameName(gameName) {
     let normalized = gameName.toLowerCase().trim();
     
-    // Check for direct pattern matches first
-    if (this.gamePatterns[normalized]) {
-      return this.gamePatterns[normalized];
-    }
-    
-    // Handle FF7 variations with special cases
-    const ff7Pattern = /^(ff|final fantasy)\s*(7|vii)\s*(r|remake|rb|rebirth)?$/i;
-    const match = normalized.match(ff7Pattern);
-    
-    if (match) {
-      const [_, prefix, number, suffix] = match;
-      if (suffix) {
-        const isSuffixRemake = suffix.toLowerCase().startsWith('r') || suffix.toLowerCase() === 'remake';
-        return isSuffixRemake ? 'final fantasy vii remake' : 'final fantasy vii rebirth';
-      }
-      return 'final fantasy vii';
-    }
-    
-    // Replace roman numerals and other variations
-    const words = normalized.split(' ');
-    const normalizedWords = words.map(word => {
-      return this.textVariations[word] || word;
-    });
-    
-    normalized = normalizedWords.join(' ');
+    // Handle special game variations first
+    const gamePatterns = {
+        'gta 5': 'grand theft auto v',
+        'gta v': 'grand theft auto v',
+        'gta5': 'grand theft auto v',
+        'gtav': 'grand theft auto v',
+        'gta': 'grand theft auto',
+        'd4': 'diablo iv',
+        'd 4': 'diablo iv',
+        'diablo 4': 'diablo iv',
+        'diablo four': 'diablo iv',
+        'diablo': 'diablo iv'
+    };
 
-    // Handle special cases with numbers
-    normalized = normalized.replace(/(\d+)(st|nd|rd|th)/, '$1');
+    // Check for exact pattern matches
+    for (const [pattern, replacement] of Object.entries(gamePatterns)) {
+        if (normalized === pattern || normalized.startsWith(pattern + ' ')) {
+            normalized = normalized.replace(pattern, replacement);
+            break;
+        }
+    }
+
+    // Handle number and roman numeral variations
+    const numberMap = {
+        '4': 'iv',
+        'four': 'iv',
+        'iv': 'iv',
+        '5': 'v',
+        'five': 'v',
+        'v': 'v',
+        '6': 'vi',
+        'six': 'vi',
+        'vi': 'vi'
+    };
+
+    // Replace number variations
+    for (const [num, replacement] of Object.entries(numberMap)) {
+        const regex = new RegExp(`\\b${num}\\b`, 'gi');
+        normalized = normalized.replace(regex, replacement);
+    }
+
+    // Basic text normalization
+    normalized = normalized
+        .replace(/[-_:]/g, ' ')
+        .replace(/[^\w\s]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    return normalized;
+  }
+
+  // Add new method to fetch DLC info
+  async getGameDLC(appId) {
+    const url = `https://store.steampowered.com/api/dlc/${appId}`;
+    const response = await fetch(url);
+    const data = await response.json();
+    return {
+        dlcCount: data.items?.length || 0,
+        dlcList: data.items?.map(dlc => dlc.name) || []
+    };
+  }
+
+  // Add new helper method for number variations
+  checkNumberVariations(name1, name2) {
+    const numberMap = {
+        '4': ['iv', 'four'],
+        'iv': ['4', 'four'],
+        'four': ['4', 'iv'],
+        '5': ['v', 'five'],
+        'v': ['5', 'five'],
+        'five': ['5', 'v'],
+        '6': ['vi', 'six'],
+        'vi': ['6', 'six'],
+        'six': ['6', 'vi']
+    };
+
+    // Check if either string contains a number or roman numeral
+    const numbers = Object.keys(numberMap).join('|');
+    const regex = new RegExp(`\\b(${numbers})\\b`, 'gi');
     
-    // Remove common suffixes
-    const suffixesToRemove = [
-      'definitive edition',
-      'game of the year edition',
-      'goty',
-      'remastered',
-      'enhanced edition',
-      'directors cut',
-      'complete edition'
-    ];
+    const matches1 = name1.match(regex);
+    const matches2 = name2.match(regex);
     
-    for (const suffix of suffixesToRemove) {
-      if (normalized.endsWith(suffix)) {
-        normalized = normalized.slice(0, -suffix.length).trim();
-      }
+    if (!matches1 || !matches2) return false;
+    
+    // Check if the numbers are equivalent
+    for (const num1 of matches1) {
+        const variations = numberMap[num1.toLowerCase()] || [];
+        for (const num2 of matches2) {
+            if (num2.toLowerCase() === num1.toLowerCase() || 
+                variations.includes(num2.toLowerCase())) {
+                return true;
+            }
+        }
     }
     
-    // Standardize separators and remove special characters
-    normalized = normalized
-      .replace(/[-_:]/g, ' ')
-      .replace(/[^\w\s]/g, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    
-    // Handle common words that might be optional
-    const optionalWords = ['the', 'a', 'an', 'and', 'or', 'of'];
-    normalized = normalized.split(' ')
-      .filter(word => !optionalWords.includes(word))
-      .join(' ');
-    
-    return normalized;
+    return false;
   }
 }
 
