@@ -94,6 +94,11 @@ class DVP {
     this.init(bot).catch(err => {
       logger.error(`Failed to initialize DVP: ${err}`);
     });
+
+    // Add new cache properties
+    this.GAME_IMAGE_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000; // 7 days
+    this.lastGameImageUpdate = null;
+    this.mostRecentGame = null;
   }
 
   async init(bot) {
@@ -104,9 +109,15 @@ class DVP {
       // Initialize Google Sheets auth
       await this.initializeGoogleSheets();
       
-      // Then initialize the rest
-      await this.initializeCog();
+      // Load caches and data
+      await this.loadLastImageUpdate();
+      await this.loadImageUrlCache();
+      await this.initializeData();
       
+      // Start periodic updates
+      this.startPeriodicScrapeUpdate();
+      
+      // Single initialization message at the end
       logger.info('DVP module initialized successfully');
     } catch (error) {
       logger.error(`Error in DVP init: ${error}`);
@@ -168,7 +179,8 @@ class DVP {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS metadata (
           key TEXT PRIMARY KEY,
-          value TEXT
+          value TEXT,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
       `);
 
@@ -178,23 +190,6 @@ class DVP {
       logger.info('Database setup complete');
     } catch (error) {
       logger.error(`Error setting up database: ${error}`);
-      throw error;
-    }
-  }
-
-  async initializeCog() {
-    logger.info('DVP module initializing');
-    try {
-      await this.loadLastScrapeTime();
-      await this.loadImageUrlCache();
-      await this.initializeData();
-      
-      this.startPeriodicScrapeUpdate();
-      this.browser = await chromium.launch({ headless: true });
-      
-      logger.info('DVP module initialized successfully');
-    } catch (error) {
-      logger.error(`Error initializing DVP module: ${error}`);
       throw error;
     }
   }
@@ -263,7 +258,7 @@ class DVP {
   }
 
   async scrapeInitialData() {
-    logger.info('Initializing data from web scraping using Playwright...');
+    logger.info('Starting optimized data scraping...');
     const browser = await chromium.launch({ headless: true });
     try {
       const context = await browser.newContext();
@@ -272,51 +267,155 @@ class DVP {
       await page.goto(`https://twitchtracker.com/${this.channelName}/games`);
       await page.waitForSelector('#games');
 
-      await page.selectOption('select[name="games_length"]', '-1');
-      await page.waitForTimeout(5000);
+      // Check if Last Seen is already in descending order
+      const lastSeenHeader = await page.$('th[aria-label*="Last Seen"]');
+      const isDescending = await lastSeenHeader.evaluate(el => 
+        el.classList.contains('sorting_desc') || 
+        el.getAttribute('aria-sort') === 'descending'
+      );
 
-      const rows = await page.$$('#games tbody tr');
-      logger.info(`Found ${rows.length} rows in the games table.`);
-
-      for (const row of rows) {
-        try {
-          const name = await row.$eval('td:nth-child(2)', el => el.textContent.trim());
-          const timePlayedStr = await row.$eval('td:nth-child(3) > span', el => el.textContent.trim());
-          const lastSeenStr = await row.$eval('td:nth-child(7)', el => el.textContent.trim());
-
-          logger.info(`Raw data - Name: ${name}, Time played: ${timePlayedStr}, Last seen: ${lastSeenStr}`);
-
-          const timePlayed = this.parseTime(timePlayedStr);
-          let lastPlayed;
-          try {
-            lastPlayed = this.parseDate(lastSeenStr);
-          } catch (error) {
-            logger.error(`Error parsing date '${lastSeenStr}': ${error}`);
-            lastPlayed = new Date().toISOString().split('T')[0];
-          }
-
-          logger.info(`Processed data - Name: ${name}, Time played: ${timePlayed} minutes (${this.formatPlaytime(timePlayed)}), Last played: ${lastPlayed}`);
-
-          // Check if the game already exists
-          const existingGame = this.preparedStatements.selectGame.get(name);
-          if (!existingGame) {
-            // Insert new game entry
-            this.preparedStatements.insertGame.run(name, timePlayed, lastPlayed, null);
-            logger.info(`Inserted new game: ${name}`);
-          } else {
-            logger.info(`Game already exists: ${name}`);
-          }
-        } catch (rowError) {
-          logger.error(`Error processing row: ${rowError}`);
+      // Only click if not already in descending order
+      if (!isDescending) {
+        await lastSeenHeader.click();
+        await page.waitForTimeout(1000);
+        
+        // Click again if needed to get to descending order
+        const isNowDescending = await lastSeenHeader.evaluate(el => 
+          el.classList.contains('sorting_desc') || 
+          el.getAttribute('aria-sort') === 'descending'
+        );
+        if (!isNowDescending) {
+          await lastSeenHeader.click();
+          await page.waitForTimeout(1000);
         }
       }
 
-      logger.info('Initial data scraping completed and data inserted into the database.');
+      // Get initial batch of rows (first page only)
+      const initialRows = await page.$$('#games tbody tr');
+      if (!initialRows.length) {
+        logger.info('No game rows found');
+        return;
+      }
+
+      // Check first few games (most recent)
+      const INITIAL_CHECK_COUNT = 5;  // Changed from 10 to 5
+      const MAX_CHECK_COUNT = 10;     // Added new constant for max check
+      const recentGames = [];
+      let needsFullUpdate = false;
+
+      for (let i = 0; i < Math.min(INITIAL_CHECK_COUNT, initialRows.length); i++) {
+        const gameData = await this.extractGameData(initialRows[i]);
+        const existingGame = this.preparedStatements.selectGame.get(gameData.name);
+
+        if (!existingGame || 
+            existingGame.time_played !== gameData.timePlayed || 
+            existingGame.last_played !== gameData.lastPlayed) {
+          recentGames.push({
+            ...gameData,
+            image_url: existingGame?.image_url || null
+          });
+          needsFullUpdate = true;
+        } else {
+          // If we find a game that hasn't changed, and it's not the first game,
+          // we can assume older games haven't changed either
+          if (i > 0) {
+            logger.info(`No changes detected after ${i} games, skipping full update`);
+            needsFullUpdate = false;
+            break;
+          }
+        }
+      }
+
+      // If we need full update, check up to MAX_CHECK_COUNT games
+      if (needsFullUpdate) {
+        logger.info('Changes detected in recent games, checking additional games');
+        
+        for (let i = INITIAL_CHECK_COUNT; i < Math.min(MAX_CHECK_COUNT, initialRows.length); i++) {
+          const gameData = await this.extractGameData(initialRows[i]);
+          const existingGame = this.preparedStatements.selectGame.get(gameData.name);
+
+          if (!existingGame || 
+              existingGame.time_played !== gameData.timePlayed || 
+              existingGame.last_played !== gameData.lastPlayed) {
+            recentGames.push({
+              ...gameData,
+              image_url: existingGame?.image_url || null
+            });
+          }
+        }
+
+        // Only if we found changes in the first 10 games do we load all games
+        if (recentGames.length > 0) {
+          logger.info('Changes detected in recent games, performing full update');
+          await page.selectOption('select[name="games_length"]', '-1');
+          await page.waitForTimeout(5000);
+
+          const allRows = await page.$$('#games tbody tr');
+          logger.info(`Checking all ${allRows.length} games for updates`);
+
+          let unchangedStreak = 0;
+          const UNCHANGED_THRESHOLD = 20;
+
+          for (let i = MAX_CHECK_COUNT; i < allRows.length; i++) {
+            const gameData = await this.extractGameData(allRows[i]);
+            const existingGame = this.preparedStatements.selectGame.get(gameData.name);
+
+            if (!existingGame || 
+                existingGame.time_played !== gameData.timePlayed || 
+                existingGame.last_played !== gameData.lastPlayed) {
+              recentGames.push({
+                ...gameData,
+                image_url: existingGame?.image_url || null
+              });
+              unchangedStreak = 0;
+            } else {
+              unchangedStreak++;
+              if (unchangedStreak >= UNCHANGED_THRESHOLD) {
+                logger.info(`Found ${UNCHANGED_THRESHOLD} unchanged games in a row, stopping scan`);
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // Update the database with any changes
+      if (recentGames.length > 0) {
+        logger.info(`Found ${recentGames.length} games that need updating`);
+        const transaction = this.db.transaction((games) => {
+          for (const game of games) {
+            this.preparedStatements.insertGame.run(
+              game.name,
+              game.timePlayed,
+              game.lastPlayed,
+              game.image_url
+            );
+          }
+        });
+        transaction(recentGames);
+      } else {
+        logger.info('No games need updating');
+      }
+
+      logger.info('Data scraping completed successfully');
     } catch (error) {
       logger.error(`Error during data scraping: ${error}`);
     } finally {
       await browser.close();
     }
+  }
+
+  // Helper method to extract game data from a row
+  async extractGameData(row) {
+    const name = await row.$eval('td:nth-child(2)', el => el.textContent.trim());
+    const timePlayedStr = await row.$eval('td:nth-child(3) > span', el => el.textContent.trim());
+    const lastSeenStr = await row.$eval('td:nth-child(7)', el => el.textContent.trim());
+
+    return {
+      name,
+      timePlayed: this.parseTime(timePlayedStr),
+      lastPlayed: this.parseDate(lastSeenStr)
+    };
   }
 
   async loadImageUrlCache() {
@@ -514,10 +613,25 @@ class DVP {
   }
 
   async fetchMissingImages() {
-    logger.info('Fetching missing images');
+    const now = Date.now();
+    
+    // Check if we need to update images based on interval
+    if (this.lastGameImageUpdate && 
+        (now - this.lastGameImageUpdate) < this.GAME_IMAGE_REFRESH_INTERVAL) {
+      logger.info('Skipping image update, not yet time');
+      return false;
+    }
+
+    logger.info('Checking for missing or outdated game images');
     const games = this.preparedStatements.selectActiveGames.all();
     let imagesFetched = false;
+
     for (const game of games) {
+      // Skip if game has image and it's not time to refresh
+      if (game.image_url && this.imageUrlCache.has(game.name)) {
+        continue;
+      }
+
       try {
         const imageUrl = await this.getGameImageUrl(game.name);
         if (imageUrl) {
@@ -529,7 +643,14 @@ class DVP {
         logger.error(`Error fetching image URL for ${game.name}: ${error}`);
       }
     }
-    logger.info(`Fetched images for ${games.length} games`);
+
+    if (imagesFetched) {
+      this.lastGameImageUpdate = now;
+      // Save last image update timestamp to database
+      this.preparedStatements.setMetadata.run('last_image_update', now.toString());
+    }
+
+    logger.info(`Image update completed, ${imagesFetched ? 'changes made' : 'no changes needed'}`);
     return imagesFetched;
   }
 
@@ -677,7 +798,7 @@ class DVP {
         const lastPlayed = this.parseDate(lastSeenStr);
         const timePlayed = this.parseTime(timePlayedStr);
 
-        logger.info(`Processed data - Name: ${name}, Time played: ${timePlayed} minutes (${this.formatPlaytime(timePlayed)}), Last played: ${lastPlayed}`);
+        logger.info(`Processed data - Name: ${name}, Time played: ${this.formatPlaytime(timePlayed)}, Last played: ${lastPlayed}`);
         await this.updateGameInfo(name, timePlayed, lastPlayed);
       }
 
@@ -1254,6 +1375,28 @@ class DVP {
         }
       ]
     };
+  }
+
+  // Add method to load last image update timestamp
+  async loadLastImageUpdate() {
+    const result = this.preparedStatements.getMetadata.get('last_image_update');
+    if (result) {
+      this.lastGameImageUpdate = parseInt(result.value);
+      logger.info(`Loaded last image update timestamp: ${new Date(this.lastGameImageUpdate)}`);
+    }
+  }
+
+  // Update database setup to include new metadata field
+  async _setupDatabase() {
+    // ... (existing setup code) ...
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
   }
 } // <-- Class definition ends here
 
