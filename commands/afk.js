@@ -298,18 +298,7 @@ class AFK {
       // Modified message handler
       if (this.chatClient) {
         this.chatClient.onMessage(async (channel, user, message, msg) => {
-          // Skip message handling if it's an AFK command - let the command handler deal with it
-          if (message.toLowerCase().startsWith('#afk') || 
-              message.toLowerCase().startsWith('#sleep') ||
-              message.toLowerCase().startsWith('#gn') ||
-              message.toLowerCase().startsWith('#work') ||
-              message.toLowerCase().startsWith('#food') ||
-              message.toLowerCase().startsWith('#gaming') ||
-              message.toLowerCase().startsWith('#bed') ||
-              message.toLowerCase().startsWith('#eating') ||
-              message.toLowerCase().startsWith('#working') ||
-              message.toLowerCase().startsWith('#bedge') ||
-              message.toLowerCase().startsWith('#rafk')) {
+          if (this.isAfkCommand(message)) {
             return;
           }
           await this.handleUserMessage(channel, user, message, msg);
@@ -359,11 +348,7 @@ class AFK {
         }
 
         // If this was triggered by an AFK command, prevent further processing
-        if (message.toLowerCase().startsWith('#afk') || 
-            message.toLowerCase().startsWith('#sleep') ||
-            message.toLowerCase().startsWith('#gn') ||
-            // ... add other AFK command variants
-            message.toLowerCase().startsWith('#bedge')) {
+        if (this.isAfkCommand(message)) {
           throw new Error('SKIP_PROCESSING');
         }
       }
@@ -395,6 +380,13 @@ class AFK {
     } catch (error) {
       logger.error(`Error clearing AFK status: ${error}`);
     }
+  }
+
+  // Helper function to check if a message is an AFK command
+  isAfkCommand(message) {
+    const afkCommands = ['#afk', '#sleep', '#gn', '#work', '#food', '#gaming', 
+                         '#bed', '#eating', '#working', '#bedge', '#rafk'];
+    return afkCommands.some(cmd => message.toLowerCase().startsWith(cmd));
   }
 }
 
