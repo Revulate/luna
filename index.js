@@ -83,14 +83,17 @@ async function main() {
     await chatClient.connect();
     logger.info('Connected to Twitch chat');
 
-    // Initialize commands and get both commands and handlers
-    const { commands, claudeHandler } = await setupCommands(chatClient);
-    logger.info(`Commands setup complete. Registered commands: ${Array.from(commands.keys()).join(', ')}`);
-
     // Initialize TwitchEventManager with both clients
     const eventManager = new TwitchEventManager(apiClient, chatClient, config.twitch.channels);
     eventManager.setMessageLogger(messageLogger);
-    
+
+    // Initialize commands and get both commands and handlers - pass eventManager
+    const { commands, claudeHandler } = await setupCommands(chatClient, eventManager);
+    logger.info(`Commands setup complete. Registered commands: ${Array.from(commands.keys()).join(', ')}`);
+
+    // Set claudeHandler in eventManager
+    eventManager.claudeHandler = claudeHandler;
+
     // Update the message handler
     chatClient.onMessage(async (channel, userstate, message, msg) => {
       try {

@@ -18,8 +18,6 @@ const RESPONSE_GUIDE = `Response Guidelines:
 - Use appropriate emotes for the emotional context
 - Keep roleplay minimal and natural`;
 
-// Then in the prompts, the ${RESPONSE_GUIDE} reference will work properly
-
 const REVULATE_PROMPT = `You are Luna (TatsLuna), a Twitch chatbot with a special connection to Revulate. Important notes about your identity:
 - Your name is Luna, but your Twitch username is TatsLuna
 - You are fully aware that you are a chatbot/AI
@@ -151,87 +149,264 @@ const MEMORY_TYPES = {
   LONG_TERM: 7200000    // 2 hours
 };
 
-// Add this class for better memory management
+// Add this class implementation before the ClaudeHandler class
 class EnhancedMemory {
-  constructor() {
+  constructor(options = {}) {
     this.shortTerm = new Map();
     this.mediumTerm = new Map();
     this.longTerm = new Map();
     this.userProfiles = new Map();
     this.channelContexts = new Map();
     this.conversationThreads = new Map();
-  }
-
-  addMemory(type, key, value, context) {
-    const memory = {
-      value,
-      context,
-      timestamp: Date.now(),
-      type: context.type,
-      relevance: this.calculateRelevance(context)
+    this.memoryQueue = new Map(); // Add this for queued memories
+    
+    // Add limits from options
+    this.limits = {
+      shortTerm: options.shortTermLimit || 100,
+      mediumTerm: options.mediumTermLimit || 500,
+      longTerm: options.longTermLimit || 1000
     };
 
-    switch(type) {
-      case 'SHORT_TERM':
-        this.shortTerm.set(key, memory);
-        setTimeout(() => this.shortTerm.delete(key), MEMORY_TYPES.SHORT_TERM);
-        break;
-      case 'MEDIUM_TERM':
-        this.mediumTerm.set(key, memory);
-        setTimeout(() => this.mediumTerm.delete(key), MEMORY_TYPES.MEDIUM_TERM);
-        break;
-      case 'LONG_TERM':
-        this.longTerm.set(key, memory);
-        setTimeout(() => this.longTerm.delete(key), MEMORY_TYPES.LONG_TERM);
-        break;
+    // Add cleanup interval
+    if (options.cleanupInterval) {
+      setInterval(() => this.cleanup(), options.cleanupInterval);
+    }
+    
+    // Add common words set for keyword filtering
+    this.commonWords = new Set([
+      'the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 
+      'i', 'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you', 
+      'do', 'at', 'this', 'but', 'his', 'by', 'from', 'they', 
+      'we', 'say', 'her', 'she', 'or', 'an', 'will', 'my', 'one', 
+      'all', 'would', 'there', 'their', 'what', 'so', 'up', 'out', 
+      'if', 'about', 'who', 'get', 'which', 'go', 'me'
+    ]);
+  }
+
+  // Update the addMemory method in EnhancedMemory class
+  addMemory(type, key, value, context = {}) {
+    try {
+      // Ensure context is an object and has required properties
+      const safeContext = {
+        type: 'GENERAL',  // Default type
+        timestamp: Date.now(),
+        ...context  // Allow override of defaults
+      };
+
+      const memory = {
+        value,
+        context: safeContext,
+        timestamp: Date.now(),
+        type: type || 'SHORT_TERM',
+        relevance: this.calculateRelevance(safeContext)
+      };
+
+      // Add to appropriate storage based on type
+      switch(type) {
+        case 'SHORT_TERM':
+          this.shortTerm.set(key, memory);
+          setTimeout(() => this.shortTerm.delete(key), MEMORY_TYPES.SHORT_TERM);
+          break;
+        case 'MEDIUM_TERM':
+          this.mediumTerm.set(key, memory);
+          setTimeout(() => this.mediumTerm.delete(key), MEMORY_TYPES.MEDIUM_TERM);
+          break;
+        case 'LONG_TERM':
+          this.longTerm.set(key, memory);
+          setTimeout(() => this.longTerm.delete(key), MEMORY_TYPES.LONG_TERM);
+          break;
+        default:
+          this.memoryQueue.set(key, memory);
+          break;
+      }
+
+      logger.debug(`Added memory of type ${type} with key ${key}`, {
+        memoryType: type,
+        key,
+        contextType: safeContext.type
+      });
+      return true;
+    } catch (error) {
+      logger.error('Error adding memory:', {
+        error: error.message,
+        stack: error.stack,
+        type,
+        key,
+        context: JSON.stringify(context)
+      });
+      return false;
     }
   }
 
+  // Also update calculateRelevance to handle undefined context
+  calculateRelevance(context = {}) {
+    try {
+      let score = 0;
+      
+      // Time relevance - use current time if timestamp is missing
+      const timeDiff = Date.now() - (context.timestamp || Date.now());
+      score += Math.max(0, 1 - (timeDiff / MEMORY_TYPES.LONG_TERM));
+
+      // Context matching - safely check properties
+      if (context.type) score += 0.5;
+      if (context.channel) score += 0.3;
+      if (context.user) score += 0.4;
+
+      // Content relevance - only if content exists
+      if (context.content) {
+        const keywords = this.extractKeywords(context.content);
+        score += keywords.length * 0.1;
+      }
+
+      return Math.min(1, Math.max(0, score)); // Ensure score is between 0 and 1
+    } catch (error) {
+      logger.error('Error calculating relevance:', error);
+      return 0; // Return minimum relevance on error
+    }
+  }
+
+  // Add methods for memory promotion
+  async promoteToMediumTerm(memory) {
+    try {
+      const key = `medium_${Date.now()}`;
+      this.mediumTerm.set(key, {
+        ...memory,
+        promotedAt: Date.now()
+      });
+      return true;
+    } catch (error) {
+      logger.error('Error promoting to medium term:', error);
+      return false;
+    }
+  }
+
+  async promoteToLongTerm(memory) {
+    try {
+      const key = `long_${Date.now()}`;
+      this.longTerm.set(key, {
+        ...memory,
+        promotedAt: Date.now()
+      });
+      return true;
+    } catch (error) {
+      logger.error('Error promoting to long term:', error);
+      return false;
+    }
+  }
+
+  // Update the getRelevantMemories method in the EnhancedMemory class
   getRelevantMemories(context) {
+    if (!context) {
+      logger.debug('No context provided to getRelevantMemories');
+      return [];
+    }
+
     const now = Date.now();
     const memories = [];
 
-    // Gather memories from all stores based on relevance
+    try {
+      // Safely get memories from each store
+      const stores = [
+        { store: 'shortTerm', map: this.shortTerm, timeLimit: MEMORY_TYPES.SHORT_TERM },
+        { store: 'mediumTerm', map: this.mediumTerm, timeLimit: MEMORY_TYPES.MEDIUM_TERM },
+        { store: 'longTerm', map: this.longTerm, timeLimit: MEMORY_TYPES.LONG_TERM }
+      ];
+
+      for (const { store, map, timeLimit } of stores) {
+        if (map && typeof map.entries === 'function') {
+          for (const [key, memory] of map.entries()) {
+            if (memory && now - memory.timestamp < timeLimit) {
+              try {
+                if (this.isRelevantToContext(memory, context)) {
+                  memories.push(memory);
+                }
+              } catch (relevanceError) {
+                logger.error(`Error checking relevance for memory in ${store}:`, relevanceError);
+              }
+            }
+          }
+        } else {
+          logger.debug(`Map not properly initialized for ${store}`);
+        }
+      }
+
+      // Sort memories by relevance
+      const sortedMemories = memories.sort((a, b) => {
+        try {
+          return (b.relevance || 0) - (a.relevance || 0);
+        } catch (sortError) {
+          logger.error('Error sorting memories:', sortError);
+          return 0;
+        }
+      });
+
+      logger.debug(`Retrieved ${sortedMemories.length} relevant memories`);
+      return sortedMemories;
+
+    } catch (error) {
+      logger.error('Error in getRelevantMemories:', error);
+      return [];
+    }
+  }
+
+  // Also update the isRelevantToContext method to be more defensive
+  isRelevantToContext(memory, context) {
+    if (!memory || !context) return false;
+
+    try {
+      // Basic relevance checks with null safety
+      if (memory.context?.type === context.type) return true;
+      if (memory.context?.channel === context.channel) return true;
+      if (memory.context?.user === context.user) return true;
+
+      // Content relevance check with null safety
+      const memoryKeywords = this.extractKeywords(memory.value?.toString() || '');
+      const contextKeywords = this.extractKeywords(context.content?.toString() || '');
+      
+      return memoryKeywords.some(keyword => contextKeywords.includes(keyword));
+    } catch (error) {
+      logger.error('Error checking relevance:', error);
+      return false;
+    }
+  }
+
+  // Update the extractKeywords method to be more defensive
+  extractKeywords(text) {
+    if (!text || typeof text !== 'string') return [];
+    
+    try {
+      return text.toLowerCase()
+        .split(/\W+/)
+        .filter(word => word.length > 3)
+        .filter(word => !this.commonWords.has(word));
+    } catch (error) {
+      logger.error('Error extracting keywords:', error);
+      return [];
+    }
+  }
+
+  // Add method to clean up old memories
+  cleanup() {
+    const now = Date.now();
+    
     for (const [store, timeLimit] of Object.entries(MEMORY_TYPES)) {
       const memoryStore = this[store.toLowerCase()];
-      for (const [key, memory] of memoryStore) {
-        if (now - memory.timestamp < timeLimit && 
-            this.isRelevantToContext(memory, context)) {
-          memories.push(memory);
+      for (const [key, memory] of memoryStore.entries()) {
+        if (now - memory.timestamp > timeLimit) {
+          memoryStore.delete(key);
         }
       }
     }
-
-    return memories.sort((a, b) => b.relevance - a.relevance);
   }
 
-  calculateRelevance(memory, currentContext) {
-    let score = 0;
-    
-    // Time relevance
-    const timeDiff = Date.now() - memory.timestamp;
-    score += Math.max(0, 1 - (timeDiff / MEMORY_TYPES.LONG_TERM));
-
-    // Context matching
-    if (memory.context.type === currentContext.type) score += 0.5;
-    if (memory.context.channel === currentContext.channel) score += 0.3;
-    if (memory.context.user === currentContext.user) score += 0.4;
-
-    // Content relevance (using simple keyword matching for now)
-    const keywords = this.extractKeywords(currentContext.content);
-    const memoryKeywords = this.extractKeywords(memory.value);
-    const keywordOverlap = keywords.filter(k => memoryKeywords.includes(k)).length;
-    score += keywordOverlap * 0.2;
-
-    return score;
-  }
-
-  extractKeywords(text) {
-    // Simple keyword extraction (could be improved with NLP)
-    return text.toLowerCase()
-      .split(/\W+/)
-      .filter(word => word.length > 3)
-      .filter(word => !commonWords.has(word));
+  // Add the missing getQueuedMemories method
+  async getQueuedMemories() {
+    try {
+      return Array.from(this.memoryQueue.values());
+    } catch (error) {
+      logger.error('Error getting queued memories:', error);
+      return [];
+    }
   }
 }
 
@@ -357,8 +532,14 @@ class ConversationContext {
 
 // Update the ClaudeHandler class
 class ClaudeHandler {
-  constructor(chatClient) {
+  constructor(chatClient, twitchEventManager) {  // Add twitchEventManager parameter
     this.chatClient = chatClient;
+    this.twitchEventManager = twitchEventManager;  // Store the reference
+    this.apiClient = chatClient.apiClient; // Add this line
+    
+    // Initialize activeThreads Map
+    this.activeThreads = new Map();
+    this.threadTimeout = 300000; // 5 minutes timeout for threads
     
     // Add debug logging for API key
     logger.debug('Initializing Anthropic client...');
@@ -384,6 +565,18 @@ class ClaudeHandler {
     this.lastResponseTime = new Map();
     this.cooldownPeriod = 300000; // 5 minutes cooldown
     
+    // Initialize personality traits
+    this.personality = {
+      baseTraits: {
+        playfulness: 0.7,
+        empathy: 0.8,
+        wit: 0.75,
+        formality: 0.3
+      },
+      channelAdaptations: new Map(),
+      userRelationships: new Map()
+    };
+    
     // Add debug logging
     if (process.env.LOG_LEVEL === 'debug') {
       logger.debug('Claude handler initialized with API key:', apiKey.substring(0, 8) + '...');
@@ -399,9 +592,6 @@ class ClaudeHandler {
     chatClient.currentChannels?.forEach(channel => {
       this.conversationHistory.set(channel, []);
     });
-
-    // Start listening to chat messages
-    // this.initializeChatListener(chatClient);
     
     logger.info('Twitch client initialized for Claude handler');
     
@@ -418,6 +608,13 @@ class ClaudeHandler {
     this.autonomousInterval = 5 * 60 * 1000; // 5 minutes
     this.autonomousChance = 0.15; // 15% chance to send message when interval passes
     
+    // Add conversation context management
+    this.conversationContexts = new Map();
+    this.lastResponses = new Map();
+
+    // Add enhanced memory system
+    this.memory = new EnhancedMemory();
+    
     // Start autonomous chat with error handling
     try {
       this.startAutonomousChat();
@@ -426,28 +623,100 @@ class ClaudeHandler {
       logger.error('Error initializing autonomous chat:', error);
     }
 
-    // Add conversation context management
-    this.conversationContexts = new Map();
-    this.lastResponses = new Map();
-
-    // Add enhanced memory system
-    this.memory = new EnhancedMemory();
+    // Initialize improved cache with metadata
+    this.responseCache = new NodeCache({ 
+      stdTTL: CACHE_TTL_SECONDS,
+      checkperiod: 600,
+      useClones: false // Performance optimization
+    });
     
-    // Add personality traits for more consistent behavior
-    this.personality = {
-      baseTraits: {
-        playfulness: 0.7,
-        empathy: 0.8,
-        wit: 0.75,
-        formality: 0.3
-      },
-      channelAdaptations: new Map(),
-      userRelationships: new Map()
+    // Add cache stats tracking
+    this.cacheStats = {
+      hits: 0,
+      misses: 0,
+      lastCleanup: Date.now()
     };
 
-    // Add conversation threading
-    this.activeThreads = new Map();
-    this.threadTimeout = 300000; // 5 minutes
+    // Initialize improved memory system
+    this.memory = new EnhancedMemory({
+      shortTermLimit: 100,  // Max items in short term memory
+      mediumTermLimit: 500, // Max items in medium term memory
+      longTermLimit: 1000,  // Max items in long term memory
+      cleanupInterval: 300000 // 5 minutes
+    });
+  }
+
+  // Add these improved cache methods to ClaudeHandler class
+  getFromCache(userId, prompt) {
+    try {
+      const cacheKey = this.generateCacheKey(userId, prompt);
+      const cached = this.responseCache.get(cacheKey);
+      
+      if (cached) {
+        this.cacheStats.hits++;
+        logger.debug(`Cache hit for key: ${cacheKey}`);
+        return {
+          response: cached.response,
+          metadata: cached.metadata,
+          age: Date.now() - cached.timestamp
+        };
+      }
+      
+      this.cacheStats.misses++;
+      return null;
+    } catch (error) {
+      logger.error('Error getting from cache:', error);
+      return null;
+    }
+  }
+
+  setInCache(userId, prompt, response, metadata = {}) {
+    try {
+      const cacheKey = this.generateCacheKey(userId, prompt);
+      const cacheEntry = {
+        response,
+        metadata: {
+          ...metadata,
+          userId,
+          timestamp: Date.now(),
+          promptLength: prompt.length,
+          responseLength: response.length
+        },
+        timestamp: Date.now()
+      };
+      
+      this.responseCache.set(cacheKey, cacheEntry);
+      logger.debug(`Cached response for key: ${cacheKey}`);
+      
+      // Cleanup old entries if needed
+      this.cleanupCacheIfNeeded();
+    } catch (error) {
+      logger.error('Error setting cache:', error);
+    }
+  }
+
+  cleanupCacheIfNeeded() {
+    const now = Date.now();
+    if (now - this.cacheStats.lastCleanup > 3600000) { // 1 hour
+      const stats = this.responseCache.getStats();
+      logger.info('Cache stats:', {
+        ...this.cacheStats,
+        keys: this.responseCache.keys().length,
+        hits: stats.hits,
+        misses: stats.misses
+      });
+      
+      // Reset stats
+      this.cacheStats.lastCleanup = now;
+      this.cacheStats.hits = 0;
+      this.cacheStats.misses = 0;
+    }
+  }
+
+  generateCacheKey(userId, prompt) {
+    // Create a unique key combining userId and normalized prompt
+    const normalizedPrompt = prompt.toLowerCase().trim();
+    return `${userId}:${normalizedPrompt}`;
   }
 
   // Add this method to get or create context for a channel
@@ -506,54 +775,108 @@ class ClaudeHandler {
 
   // Add this method for dynamic personality adaptation
   updatePersonalityForContext(channel, user, context) {
-    const baseTraits = { ...this.personality.baseTraits };
-    
-    // Adapt to channel mood
-    const channelMood = this.analyzeMood(context.recentMessages);
-    if (channelMood === 'hype') baseTraits.playfulness += 0.2;
-    if (channelMood === 'serious') baseTraits.formality += 0.2;
-    
-    // Adapt to user relationship
-    const userRelationship = this.personality.userRelationships.get(user.username) || {
-      familiarity: 0,
-      rapport: 0
-    };
-    
-    baseTraits.formality -= userRelationship.familiarity * 0.1;
-    baseTraits.playfulness += userRelationship.rapport * 0.1;
+    try {
+      const baseTraits = { ...this.personality.baseTraits };
+      
+      // Safely check channel mood
+      if (context?.channel?.mood) {
+        if (context.channel.mood === 'hype') baseTraits.playfulness += 0.2;
+        if (context.channel.mood === 'serious') baseTraits.formality += 0.2;
+      }
+      
+      // Safely get user relationship
+      const userRelationship = this.personality?.userRelationships?.get(user?.username) || {
+        familiarity: 0,
+        rapport: 0
+      };
+      
+      // Apply relationship modifiers
+      baseTraits.formality = Math.max(0, Math.min(1, baseTraits.formality - (userRelationship.familiarity * 0.1)));
+      baseTraits.playfulness = Math.max(0, Math.min(1, baseTraits.playfulness + (userRelationship.rapport * 0.1)));
 
-    return baseTraits;
+      return baseTraits;
+    } catch (error) {
+      logger.error('Error in updatePersonalityForContext:', error);
+      return this.personality.baseTraits; // Return default traits on error
+    }
   }
 
   // Add this method for better context building
   async buildEnhancedContext(channel, user, message, recentMessages) {
-    const context = {
-      channel: {
-        name: channel,
-        isLive: await this.isChannelLive(channel),
-        mood: this.analyzeMood(recentMessages),
-        activity: this.measureChannelActivity(recentMessages)
-      },
-      user: {
-        ...user,
-        relationship: this.personality.userRelationships.get(user.username),
-        recentInteractions: this.memory.getRelevantMemories({ type: 'USER_INTERACTION', user: user.username })
-      },
-      conversation: {
-        thread: this.getOrCreateThread(channel, user),
-        recentMessages: this.formatConversationContext(recentMessages),
-        relevantMemories: this.memory.getRelevantMemories({ type: 'CHAT', channel })
-      },
-      emotes: {
-        recentlyUsed: this.getRecentEmotes(recentMessages),
-        channelMeta: await this.getChannelEmoteMeta(channel)
-      }
-    };
+    // Add safety check for recentMessages
+    const safeRecentMessages = Array.isArray(recentMessages) ? recentMessages : [];
+    
+    logger.debug(`Building context for channel: ${channel}, messages count: ${safeRecentMessages.length}`);
 
-    return context;
+    try {
+      // Get relevant memories first
+      const relevantMemories = this.memory?.getRelevantMemories({ 
+        type: 'USER_INTERACTION', 
+        user: user.username,
+        channel 
+      }) || [];
+
+      // Ensure messages have the correct structure
+      const processedMessages = safeRecentMessages.map(msg => ({
+        message: msg.message || msg.content || '',
+        username: msg.username || (msg.user && msg.user.username) || 'unknown',
+        timestamp: msg.timestamp || Date.now(),
+        emotes: msg.emotes || []
+      }));
+
+      const context = {
+        channel: {
+          name: channel,
+          isLive: this.twitchEventManager ? 
+            await this.twitchEventManager.isChannelLive(channel) : 
+            false,
+          mood: this.analyzeMood(processedMessages),
+          activity: this.measureChannelActivity(processedMessages)
+        },
+        user: {
+          ...user,
+          relationship: this.personality?.userRelationships?.get(user.username) || {
+            familiarity: 0,
+            rapport: 0,
+            lastInteraction: 0
+          },
+          recentInteractions: relevantMemories.slice(0, 5)
+        },
+        conversation: {
+          thread: this.getOrCreateThread(channel, user),
+          recentMessages: this.formatConversationContext(processedMessages),
+          relevantMemories: relevantMemories
+        },
+        memory: {
+          recentInteractions: relevantMemories.slice(0, 5),
+          importantContext: this.getChannelContext(channel).getImportantContext() || [],
+          totalMemories: relevantMemories.length
+        },
+        emotes: {
+          recentlyUsed: this.getRecentEmotes(processedMessages),
+          channelMeta: await this.getChannelEmoteMeta(channel)
+        }
+      };
+
+      logger.debug('Built context:', JSON.stringify(context, null, 2));
+      return context;
+    } catch (error) {
+      logger.error('Error building enhanced context:', error);
+      // Return a minimal valid context if there's an error
+      return {
+        channel: { name: channel, mood: 'neutral', activity: 0 },
+        user: { ...user },
+        conversation: { thread: this.getOrCreateThread(channel, user) },
+        memory: {
+          recentInteractions: [],
+          importantContext: [],
+          totalMemories: 0
+        },
+        emotes: { recentlyUsed: [], channelMeta: null }
+      };
+    }
   }
 
-  // Add this method for conversation threading
   getOrCreateThread(channel, user) {
     const threadKey = `${channel}-${user.username}`;
     let thread = this.activeThreads.get(threadKey);
@@ -563,41 +886,123 @@ class ClaudeHandler {
         id: Date.now(),
         messages: [],
         context: {},
-        lastActivity: Date.now()
+        lastActivity: Date.now(),
+        metadata: {
+          channel,
+          user: user.username,
+          startTime: Date.now()
+        }
       };
       this.activeThreads.set(threadKey, thread);
+      logger.debug(`Created new conversation thread for ${threadKey}`);
     }
 
     // Update last activity
     thread.lastActivity = Date.now();
     
-    // Clean up old threads
-    this.cleanupOldThreads();
+    // Clean up old threads periodically
+    if (Math.random() < 0.1) { // 10% chance to cleanup on thread access
+      this.cleanupOldThreads();
+    }
     
     return thread;
   }
 
-  // Update the handleMention method to use enhanced context
-  async handleMention(channel, user, message, msg) {
+  // Add this method to the ClaudeHandler class
+  updateThreadContext(thread, message, metadata = {}) {
     try {
-      const recentMessages = await MessageLogger.getRecentMessages(channel, 25);
-      const enhancedContext = await this.buildEnhancedContext(channel, user, message, recentMessages);
+      if (!thread) {
+        logger.error('Invalid thread provided to updateThreadContext');
+        return;
+      }
+
+      // Add message to thread
+      thread.messages.push({
+        content: message,
+        timestamp: Date.now(),
+        ...metadata
+      });
+
+      // Update thread metadata
+      thread.lastActivity = Date.now();
+      thread.context = {
+        ...thread.context,
+        messageCount: (thread.messages || []).length,
+        lastMessageType: metadata.type || 'unknown'
+      };
+
+      // Trim old messages if needed
+      const MAX_THREAD_MESSAGES = 25;
+      if (thread.messages.length > MAX_THREAD_MESSAGES) {
+        thread.messages = thread.messages.slice(-MAX_THREAD_MESSAGES);
+      }
+
+      logger.debug(`Updated thread context: ${thread.id}`);
+    } catch (error) {
+      logger.error('Error in updateThreadContext:', error);
+    }
+  }
+
+  // Update handleMention to improve logging flow
+  async handleMention(channel, user, message, msg) {
+    if (!channel || !user) {
+      logger.error('Missing required parameters in handleMention:', { channel, user });
+      return;
+    }
+
+    logger.info(`Processing mention from ${user.username} in ${channel}: ${message}`);
+
+    try {
+      // Get recent messages and conversation history
+      const rawMessages = await MessageLogger.getRecentMessages(channel, 25);
+      const conversationHistory = this.conversationHistory.get(channel) || [];
+      
+      // Update conversation history with new message
+      await this.updateConversationHistory(channel, user, message, msg);
+      
+      // Get channel context
+      const channelContext = this.getChannelContext(channel);
+      channelContext.addMessage({
+        content: message,
+        user: user.username,
+        timestamp: Date.now()
+      }, true);
+
+      // Get thread before building context
+      const thread = this.getOrCreateThread(channel, user);
+      
+      // Update thread with incoming message
+      this.updateThreadContext(thread, message, {
+        type: 'mention',
+        user: user.username,
+        timestamp: Date.now()
+      });
+
+      // Build enhanced context
+      logger.debug('Building enhanced context...');
+      const enhancedContext = await this.buildEnhancedContext(
+        channel.replace('#', ''),
+        {
+          ...user,
+          username: user.username || user.name,
+          displayName: user.displayName || user.username || user.name
+        },
+        message,
+        [...rawMessages, ...conversationHistory]
+      );
+
+      // Update personality and build system prompt
       const personality = this.updatePersonalityForContext(channel, user, enhancedContext);
       
-      // Build the system prompt with enhanced context
       const systemPrompt = `${getSystemPrompt(user.username)}
 Channel Context: ${JSON.stringify(enhancedContext.channel)}
-Conversation Thread: ${JSON.stringify(enhancedContext.conversation)}
+Conversation Thread: ${JSON.stringify(thread)}
 User Relationship: ${JSON.stringify(enhancedContext.user.relationship)}
-Personality Traits: ${JSON.stringify(personality)}
+Recent Memories: ${JSON.stringify(enhancedContext.memory.recentInteractions)}
+Important Context: ${JSON.stringify(enhancedContext.memory.importantContext)}
+Personality Traits: ${JSON.stringify(personality)}`;  // Note the closing backtick here
 
-Maintain consistent personality while adapting to:
-1. Channel mood and activity
-2. User relationship and history
-3. Conversation thread context
-4. Recent emote usage patterns`;
-
-      // Generate response with enhanced context
+      // Generate response with full context
       const response = await this.anthropic.messages.create({
         model: CLAUDE_MODEL,
         max_tokens: MAX_TOKENS,
@@ -606,22 +1011,31 @@ Maintain consistent personality while adapting to:
         messages: [
           {
             role: "user",
-            content: `${JSON.stringify(enhancedContext)}\n\nRespond naturally but concisely to this mention: "${message}"`
+            content: JSON.stringify({
+              context: enhancedContext,
+              message: message
+            })
           }
         ]
       });
 
-      // Process the response
       let generatedResponse = response.content[0].text;
-      
-      // Clean up the response
       generatedResponse = generatedResponse
-        .replace(/^@\w+\s+/, '') // Remove any leading @mention
-        .replace(/@Revulate\s+/, '') // Remove any @Revulate mention
-        .replace(/@user\s+/, '') // Remove any @user mention
+        .replace(/^@\w+\s+/, '')
+        .replace(/@Revulate\s+/, '')
+        .replace(/@user\s+/, '')
         .trim();
 
-      // Send the response using our improved split message function
+      logger.debug('Generated response:', generatedResponse);
+
+      // Update thread with bot's response
+      this.updateThreadContext(thread, generatedResponse, {
+        type: 'response',
+        user: 'TatsLuna',
+        timestamp: Date.now()
+      });
+
+      // Send response
       const prefix = `@${user.displayName} `;
       await sendSplitMessage(
         channel,
@@ -631,12 +1045,44 @@ Maintain consistent personality while adapting to:
         MessageLogger
       );
 
+      // Cache the response
+      this.setInCache(user.userId, message, generatedResponse);
+
       // Update memory and relationships
-      this.updateMemoryAndRelationships(channel, user, message, generatedResponse, enhancedContext);
+      await this.updateMemoryAndRelationships(channel, user, message, generatedResponse, enhancedContext);
+
+      // Get relevant memories with importance scoring
+      const relevantMemories = await this.memory.getRelevantMemories({
+        type: 'USER_INTERACTION',
+        user: user.username,
+        channel: channel,
+        importance: 0.4 // Only get memories above this importance threshold
+      });
+
+      // Process memory queue periodically
+      if (Math.random() < 0.1) { // 10% chance
+        await this.processMemoryQueue();
+      }
+
+      logger.info(`Successfully processed mention from ${user.username}`);
 
     } catch (error) {
-      logger.error('Error in enhanced mention handling:', error);
-      // ... error handling ...
+      logger.error('Error in handleMention:', {
+        error: error.message,
+        stack: error.stack,
+        channel,
+        user: user?.username,
+        message
+      });
+      
+      // Send fallback response
+      try {
+        const errorResponse = `@${user.displayName} Sorry, I encountered an error: ${error.message}`;
+        await this.chatClient.say(channel, errorResponse);
+        await MessageLogger.logBotMessage(channel, errorResponse);
+      } catch (sendError) {
+        logger.error('Error sending error response:', sendError);
+      }
     }
   }
 
@@ -718,30 +1164,40 @@ Maintain consistent personality while adapting to:
   }
 
   formatConversationContext(history) {
-    // Group messages by user for better context
-    const userMessages = {};
-    
-    history.forEach(msg => {
-      const username = msg.username;
-      if (!userMessages[username]) {
-        userMessages[username] = [];
-      }
-      userMessages[username].push({
-        message: msg.message,
-        timestamp: msg.timestamp
+    if (!history || !Array.isArray(history)) {
+      logger.debug('Invalid history provided to formatConversationContext');
+      return "No recent messages available.";
+    }
+
+    try {
+      // Group messages by user for better context
+      const userMessages = {};
+      
+      history.filter(msg => msg && msg.username && msg.message).forEach(msg => {
+        const username = msg.username;
+        if (!userMessages[username]) {
+          userMessages[username] = [];
+        }
+        userMessages[username].push({
+          message: String(msg.message),
+          timestamp: msg.timestamp || Date.now()
+        });
       });
-    });
 
-    // Format the context with clear user attribution
-    let contextString = "Recent chat messages:\n";
-    
-    // Add messages in chronological order with clear user separation
-    history.forEach(msg => {
-      const timestamp = new Date(msg.timestamp).toLocaleTimeString();
-      contextString += `[${timestamp}] ${msg.username}: ${msg.message}\n`;
-    });
+      // Format the context with clear user attribution
+      let contextString = "Recent chat messages:\n";
+      
+      // Add messages in chronological order with clear user separation
+      history.filter(msg => msg && msg.username && msg.message).forEach(msg => {
+        const timestamp = new Date(msg.timestamp || Date.now()).toLocaleTimeString();
+        contextString += `[${timestamp}] ${msg.username}: ${String(msg.message)}\n`;
+      });
 
-    return contextString;
+      return contextString || "No recent messages available.";
+    } catch (error) {
+      logger.error('Error in formatConversationContext:', error);
+      return "Error formatting conversation context.";
+    }
   }
 
   analyzeChannelContext(channel, history) {
@@ -754,61 +1210,120 @@ Maintain consistent personality while adapting to:
   }
 
   // Helper methods for conversation analysis
+  // Update the analyzeMood method to be more defensive
   analyzeMood(messages) {
-    const moodIndicators = {
-      hype: ['PogChamp ', 'HYPERS ', 'PagMan ', 'POGGIES ', 'LETS GO', 'POGGERS '],
-      funny: ['KEKW ', 'LULW ', 'OMEGALUL ', 'LOL', 'LMAO'],
-      sad: ['Sadge ', 'PepeHands ', 'widepeepoSad ', 'D:', 'FeelsBadMan '],
-      angry: ['Madge ', 'BabyRage ', 'WeirdChamp ', 'wtf', 'trash'],
-      chill: ['NOTED ', 'Chatting ', 'FeelsOkayMan ', 'PauseChamp ']
-    };
+    // Add defensive check at the start
+    if (!messages || !Array.isArray(messages)) {
+      logger.debug('Invalid messages array provided to analyzeMood');
+      return 'neutral'; // Default mood
+    }
 
-    const moodCounts = Object.keys(moodIndicators).reduce((acc, mood) => {
-      acc[mood] = 0;
-      return acc;
-    }, {});
+    try {
+      const moodIndicators = {
+        hype: ['PogChamp', 'HYPERS', 'PagMan', 'POGGIES', 'LETS GO', 'POGGERS'],
+        funny: ['KEKW', 'LULW', 'OMEGALUL', 'LOL', 'LMAO'],
+        sad: ['Sadge', 'PepeHands', 'widepeepoSad', 'D:', 'FeelsBadMan'],
+        angry: ['Madge', 'BabyRage', 'WeirdChamp', 'wtf', 'trash'],
+        chill: ['NOTED', 'Chatting', 'FeelsOkayMan', 'PauseChamp']
+      };
 
-    messages.forEach(msg => {
-      const messageLower = msg.message.toLowerCase();
-      Object.entries(moodIndicators).forEach(([mood, indicators]) => {
-        if (indicators.some(indicator => {
-          // Check for emotes with proper spacing
-          const emotePattern = new RegExp(`${indicator.toLowerCase()}(?:\\s|$)`);
-          return emotePattern.test(messageLower);
-        })) {
-          moodCounts[mood]++;
+      const moodCounts = {};
+      Object.keys(moodIndicators).forEach(mood => {
+        moodCounts[mood] = 0;
+      });
+
+      // Process each message safely
+      messages.forEach(msg => {
+        if (!msg || !msg.message) return;
+        
+        const messageLower = msg.message.toString().toLowerCase();
+        
+        // Check each mood's indicators
+        Object.entries(moodIndicators).forEach(([mood, indicators]) => {
+          if (!Array.isArray(indicators)) return;
+          
+          indicators.forEach(indicator => {
+            if (messageLower.includes(indicator.toLowerCase())) {
+              moodCounts[mood] = (moodCounts[mood] || 0) + 1;
+            }
+          });
+        });
+      });
+
+      // Get the dominant mood
+      let dominantMood = 'neutral';
+      let maxCount = 0;
+
+      Object.entries(moodCounts).forEach(([mood, count]) => {
+        if (count > maxCount) {
+          maxCount = count;
+          dominantMood = mood;
         }
       });
-    });
 
-    // Get the dominant mood
-    const dominantMood = Object.entries(moodCounts)
-      .sort(([,a], [,b]) => b - a)[0][0];
+      logger.debug('Mood analysis:', { moodCounts, dominantMood });
+      return dominantMood;
 
-    return dominantMood;
+    } catch (error) {
+      logger.error('Error in analyzeMood:', error);
+      return 'neutral';
+    }
   }
 
   getActiveUsers(history) {
-    return [...new Set(history.map(msg => msg.user.displayName))];
+    if (!history || !Array.isArray(history)) {
+      logger.debug('Invalid history provided to getActiveUsers');
+      return [];
+    }
+
+    try {
+      return [...new Set(history
+        .filter(msg => msg && (msg.user || msg.username || msg.displayName))
+        .map(msg => {
+          // Handle different message formats
+          if (msg.user && msg.user.displayName) return msg.user.displayName;
+          if (msg.user && msg.user.username) return msg.user.username;
+          if (msg.username) return msg.username;
+          if (msg.displayName) return msg.displayName;
+          return 'unknown_user';
+        })
+      )];
+    } catch (error) {
+      logger.error('Error in getActiveUsers:', error);
+      return [];
+    }
   }
 
   extractTopics(messages) {
-    // Simple keyword extraction
-    const commonWords = new Set(['the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'i', 'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you', 'do', 'at']);
-    const words = messages
-      .map(msg => msg.message.toLowerCase().split(/\s+/))
-      .flat()
-      .filter(word => word.length > 3 && !commonWords.has(word));
-    
-    const wordFreq = {};
-    words.forEach(word => {
-      wordFreq[word] = (wordFreq[word] || 0) + 1;
-    });
-    
-    return Object.entries(wordFreq)
-      .sort(([,a], [,b]) => b - a)
-      .slice(0, 5)
-      .map(([word]) => word);
+    if (!messages || !Array.isArray(messages)) {
+      logger.debug('Invalid messages array provided to extractTopics');
+      return [];
+    }
+
+    try {
+      const commonWords = new Set(['the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'i', 'it', 'for', 'not', 'on', 'with', 'he', 'as', 'you', 'do', 'at']);
+      
+      const words = messages
+        .filter(msg => msg && typeof msg.message === 'string')
+        .map(msg => msg.message.toLowerCase().split(/\s+/))
+        .flat()
+        .filter(word => word && word.length > 3 && !commonWords.has(word));
+      
+      const wordFreq = {};
+      words.forEach(word => {
+        if (word) {
+          wordFreq[word] = (wordFreq[word] || 0) + 1;
+        }
+      });
+      
+      return Object.entries(wordFreq)
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 5)
+        .map(([word]) => word);
+    } catch (error) {
+      logger.error('Error in extractTopics:', error);
+      return [];
+    }
   }
 
   measureConversationActivity(history) {
@@ -829,17 +1344,13 @@ Maintain consistent personality while adapting to:
 
   async handleClaudeCommand(context) {
     const { channel, user, args } = context;
-    
-    try {
-      const prompt = args.join(' ');
-      
-      // Add debug logging
-      logger.debug(`Claude API Key: ${config.anthropic.apiKey.substring(0, 5)}...`);
-      logger.debug(`Prompt: ${prompt}`);
+    const prompt = args.join(' ');
 
+    try {
       // Check cache first
       const cachedResponse = this.getFromCache(user.userId, prompt);
       if (cachedResponse) {
+        logger.debug('Cache hit for prompt:', prompt);
         const response = `@${user.username} ${cachedResponse}`;
         await MessageLogger.logBotMessage(channel, response);
         await context.say(response);
@@ -848,75 +1359,42 @@ Maintain consistent personality while adapting to:
 
       logger.info(`Processing Claude request from ${user.username}: ${prompt}`);
 
-      // Check for URLs in the prompt
-      const urlMatch = prompt.match(/(https?:\/\/)?(?:www\.)?(i\.)?(?:nuuls\.com|kappa\.lol|twitch\.tv|youtube\.com|youtu\.be|[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)\/\S+/gi);
-      
-      let response;
-      if (urlMatch) {
-        logger.info(`Starting content analysis for URL in prompt: ${urlMatch[0]}`);
-        const analysis = await this.analyzeContentInMessage(prompt);
-        if (analysis) {
-          response = `@${user.username} ${analysis}`;
-        }
-      }
-
-      // If no URL analysis or it failed, proceed with normal Claude response
-      if (!response) {
-        const messages = [
-          {
-            role: "system",
-            content: user.username.toLowerCase() === 'revulate' ? SYSTEM_PROMPT : OTHER_PROMPT
-          },
+      // Get Claude's response
+      const response = await this.anthropic.messages.create({
+        model: CLAUDE_MODEL,
+        max_tokens: MAX_TOKENS,
+        temperature: TEMPERATURE,
+        system: user.username.toLowerCase() === 'revulate' ? REVULATE_PROMPT : OTHER_PROMPT,
+        messages: [
           {
             role: "user",
             content: prompt
           }
-        ];
-
-        logger.debug('Sending request to Claude');
-        let claudeResponse;
-        
-        try {
-          claudeResponse = await this.anthropic.messages.create({
-            model: CLAUDE_MODEL,
-            max_tokens: MAX_TOKENS,
-            temperature: TEMPERATURE,
-            system: user.username.toLowerCase() === 'revulate' ? SYSTEM_PROMPT : OTHER_PROMPT,
-            messages: [
-              {
-                role: "user",
-                content: prompt
-              }
-            ]
-          });
-          logger.debug('Claude response received:', claudeResponse);
-        } catch (apiError) {
-          logger.error('Claude API Error:', {
-            status: apiError.status,
-            type: apiError.type,
-            message: apiError.message,
-            response: apiError.response
-          });
-          throw apiError;
-        }
-
-        const generatedResponse = claudeResponse.content[0].text;
-        const prefix = `@${user.username} `;
-        
-        await sendSplitMessage(
-          channel,
-          generatedResponse,
-          prefix,
-          this.chatClient,
-          MessageLogger
-        );
-      }
-    } catch (error) {
-      logger.error(`Error processing Claude command:`, {
-        error: error.message,
-        stack: error.stack,
-        response: error.response
+        ]
       });
+
+      // Extract and clean the generated response
+      const generatedResponse = response.content[0].text
+        .replace(/^@\w+\s+/, '')
+        .replace(/@Revulate\s+/, '')
+        .replace(/@user\s+/, '')
+        .trim();
+
+      // Cache the response
+      this.setInCache(user.userId, prompt, generatedResponse);
+
+      // Send the response
+      const prefix = `@${user.username} `;
+      await sendSplitMessage(
+        channel,
+        generatedResponse,
+        prefix,
+        this.chatClient,
+        MessageLogger
+      );
+
+    } catch (error) {
+      logger.error('Error in handleClaudeCommand:', error);
       const errorResponse = `@${user.username}, Sorry, an error occurred while processing your request. ${error.message}`;
       await MessageLogger.logBotMessage(channel, errorResponse);
       await context.say(errorResponse);
@@ -1087,206 +1565,465 @@ Maintain consistent personality while adapting to:
 
       return claudeResponse.content[0].text;
     } catch (error) {
-      logger.error(`Error analyzing YouTube video: ${error.message}`);
-      return "Sorry, I couldn't analyze that YouTube video.";
+      logger.error(`Error analyzing YouTube video: ${error.message}`, {
+        error,
+        stack: error.stack,
+        url
+      });
+      return "Sorry, I couldn't analyze that YouTube video at the moment.";
     }
   }
 
-  async analyzeImage(url, question) {
+  // Add the missing measureChannelActivity method
+  measureChannelActivity(messages) {
+    if (!messages || !Array.isArray(messages)) {
+      logger.debug('Invalid messages array provided to measureChannelActivity');
+      return 0;
+    }
+
     try {
-      const response = await this.anthropic.messages.create({
-        model: CLAUDE_MODEL,
-        max_tokens: MAX_TOKENS,
-        temperature: TEMPERATURE,
-        system: OTHER_PROMPT,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: question || "What do you see in this image?"
-              },
-              {
-                type: "image",
-                source: {
-                  type: "base64",
-                  media_type: "image/jpeg",
-                  data: await this.getImageAsBase64(url)
-                }
-              }
-            ]
-          }
-        ]
+      const now = Date.now();
+      const recentMessages = messages.filter(msg => {
+        const msgTime = msg.timestamp || Date.now();
+        return (now - msgTime) < (5 * 60 * 1000); // Last 5 minutes
       });
 
-      return response.content[0].text;
+      return recentMessages.length;
     } catch (error) {
-      logger.error(`Error analyzing image: ${error.message}`);
-      return "Sorry, I couldn't analyze that image.";
+      logger.error('Error measuring channel activity:', error);
+      return 0;
     }
   }
 
-  async analyzeWebContent(url, question) {
-    try {
-      const response = await this.anthropic.messages.create({
-        model: CLAUDE_MODEL,
-        max_tokens: MAX_TOKENS,
-        temperature: TEMPERATURE,
-        system: OTHER_PROMPT,
-        messages: [
-          {
-            role: "user",
-            content: `Please analyze this webpage: ${url}
-              ${question ? `\nUser asked: ${question}` : '\nProvide a brief description of the content.'}`
-          }
-        ]
-      });
-
-      return response.content[0].text;
-    } catch (error) {
-      logger.error(`Error analyzing web content: ${error.message}`);
-      return "Sorry, I couldn't analyze that webpage.";
+  // Add the startAutonomousChat method
+  startAutonomousChat() {
+    if (!this.chatClient || !this.twitchEventManager) {
+      logger.error('Cannot start autonomous chat: missing required clients');
+      return;
     }
-  }
 
-  async getImageAsBase64(url) {
-    try {
-      const response = await fetch(url);
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      return buffer.toString('base64');
-    } catch (error) {
-      logger.error(`Error getting image as base64: ${error.message}`);
-      throw error;
-    }
-  }
-
-  getFromCache(userId, prompt) {
-    const cacheKey = `claude_${userId}_${prompt}`;
-    return this.responseCache.get(cacheKey);
-  }
-
-  addToCache(userId, prompt, response) {
-    const cacheKey = `claude_${userId}_${prompt}`;
-    this.responseCache.set(cacheKey, response);
-  }
-
-  hashContext(context) {
-    let hash = 0;
-    for (let i = 0; i < context.length; i++) {
-      const char = context.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash;
-    }
-    return hash.toString();
-  }
-
-  calculateMessageFrequency(history) {
-    if (history.length < 2) return 0;
-    const timeSpan = history[history.length - 1].timestamp - history[0].timestamp;
-    return history.length / (timeSpan / 1000 / 60); // messages per minute
-  }
-
-  calculateUserEngagement(history) {
-    const uniqueUsers = new Set(history.map(msg => msg.user.name)).size;
-    return Math.min(uniqueUsers / 5, 1); // normalized 0-1, max at 5 users
-  }
-
-  hasRelevantTopics(topics) {
-    const relevantTopics = ['game', 'stream', 'chat', 'emote', 'twitch'];
-    return topics.some(topic => relevantTopics.includes(topic.toLowerCase()));
-  }
-
-  async startAutonomousChat() {
     setInterval(async () => {
       try {
-        // Get channels safely using TwitchEventManager's method
-        const channels = this.chatClient.getChannels?.() || [];
-        
-        // Ensure we have an array of channels
-        const channelList = Array.isArray(channels) ? channels : 
-                           typeof channels === 'string' ? [channels] : 
-                           [];
+        const channels = this.twitchEventManager.getChannels();
+        logger.debug(`Checking autonomous chat for channels: ${channels.join(', ')}`);
 
-        for (const channel of channelList) {
+        for (const channelName of channels) {
           try {
-            await this.tryAutonomousMessage(channel);
-          } catch (error) {
-            logger.error(`Error in autonomous chat for ${channel}:`, error);
+            const lastMessage = this.lastAutonomousMessage.get(channelName) || 0;
+            const now = Date.now();
+
+            // Check if enough time has passed and RNG check passes
+            if (now - lastMessage >= this.autonomousInterval && Math.random() < this.autonomousChance) {
+              const isLive = await this.twitchEventManager.isChannelLive(channelName);
+              if (!isLive) {
+                logger.debug(`Skipping autonomous chat for offline channel: ${channelName}`);
+                continue;
+              }
+
+              // Get recent messages for context
+              const recentMessages = await MessageLogger.getRecentMessages(channelName, 10);
+              if (!recentMessages || recentMessages.length === 0) {
+                logger.debug(`No recent messages found for channel: ${channelName}`);
+                continue;
+              }
+
+              // Generate autonomous message
+              const context = await this.buildEnhancedContext(
+                channelName,
+                { username: 'TatsLuna', displayName: 'TatsLuna' },
+                '',
+                recentMessages
+              );
+
+              const prompt = `Based on the current chat context and channel activity, generate a natural, engaging message to contribute to the conversation. Keep it casual and relevant to the ongoing discussion.
+
+                Channel Context: ${JSON.stringify(context.channel)}
+                Recent Messages: ${JSON.stringify(context.conversation.recentMessages)}
+                Current Mood: ${context.channel.mood}
+
+                Generate a single, natural chat message that fits the current conversation.`;
+
+              const response = await this.anthropic.messages.create({
+                model: CLAUDE_MODEL,
+                max_tokens: MAX_TOKENS,
+                temperature: TEMPERATURE,
+                system: OTHER_PROMPT,
+                messages: [{ role: "user", content: prompt }]
+              });
+
+              const message = response.content[0].text.trim();
+              await this.chatClient.say(channelName, message);
+              await MessageLogger.logBotMessage(channelName, message);
+              
+              this.lastAutonomousMessage.set(channelName, now);
+              logger.info(`Sent autonomous message in ${channelName}: ${message}`);
+            }
+          } catch (channelError) {
+            logger.error(`Error processing autonomous chat for channel ${channelName}:`, channelError);
           }
         }
       } catch (error) {
-        logger.error('Error in autonomous chat loop:', error);
+        logger.error('Error in autonomous chat:', error);
       }
-    }, 30000); // Check every 30 seconds
+    }, 60000); // Check every minute
   }
 
-  async tryAutonomousMessage(channel) {
-    if (!channel) return;
-    
-    const channelName = channel.replace(/^#/, '');
-    const lastMessage = this.lastAutonomousMessage.get(channelName) || 0;
-    const now = Date.now();
-    
-    // Check if enough time has passed
-    if (now - lastMessage < this.autonomousInterval) {
-      return;
-    }
-
-    // Random chance to send message
-    if (Math.random() > this.autonomousChance) {
-      return;
+  // Add this method to the ClaudeHandler class
+  getRecentEmotes(messages) {
+    if (!messages || !Array.isArray(messages)) {
+      logger.debug('Invalid messages array provided to getRecentEmotes');
+      return [];
     }
 
     try {
-      // Get recent messages for context
-      const recentMessages = await MessageLogger.getRecentMessages(channelName, 10);
-      if (!recentMessages || recentMessages.length < 3) {
-        return; // Need at least 3 messages for context
+      const emotes = new Map();
+      
+      messages.forEach(msg => {
+        if (!msg) return;
+
+        // Handle different message formats
+        const messageEmotes = msg.emotes || msg.emotesRaw || msg.emotesMap || [];
+        
+        if (!messageEmotes) {
+          logger.debug(`No emotes found in message: ${JSON.stringify(msg)}`);
+          return;
+        }
+
+        // Handle array format
+        if (Array.isArray(messageEmotes)) {
+          messageEmotes.forEach(emote => {
+            if (!emote) return;
+            const emoteName = emote.name || emote.id || emote;
+            if (emoteName) {
+              emotes.set(emoteName, (emotes.get(emoteName) || 0) + 1);
+            }
+          });
+        } 
+        // Handle object format
+        else if (typeof messageEmotes === 'object' && messageEmotes !== null) {
+          Object.entries(messageEmotes).forEach(([emoteId, positions]) => {
+            if (emoteId) {
+              emotes.set(emoteId, (emotes.get(emoteId) || 0) + 1);
+            }
+          });
+        }
+      });
+
+      // Sort by frequency and take top 5
+      return Array.from(emotes.entries())
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 5)
+        .map(([emote]) => emote);
+
+    } catch (error) {
+      logger.error('Error getting recent emotes:', error);
+      return [];
+    }
+  }
+
+  // Add this method to get channel emotes
+  async getChannelEmoteMeta(channel) {
+    try {
+      // Get channel ID first
+      const user = await this.apiClient.users.getUserByName(channel.replace('#', ''));
+      if (!user) return null;
+
+      // Get channel emotes
+      const emotes = await this.apiClient.chat.getChannelEmotes(user.id);
+      
+      return {
+        channelEmotes: emotes.map(emote => ({
+          id: emote.id,
+          name: emote.name,
+          type: emote.type
+        })),
+        emoteCount: emotes.length
+      };
+    } catch (error) {
+      logger.error(`Error getting channel emote meta for ${channel}:`, error);
+      return null;
+    }
+  }
+
+  // Add this method back to the ClaudeHandler class
+  cleanupOldThreads() {
+    try {
+    const now = Date.now();
+      if (!this.activeThreads || !(this.activeThreads instanceof Map)) {
+        logger.error('activeThreads is not properly initialized');
+      return;
+    }
+
+      Array.from(this.activeThreads.entries()).forEach(([threadKey, thread]) => {
+        if (!thread) return;
+        
+        try {
+          if (now - (thread.lastActivity || 0) > this.threadTimeout) {
+            // Archive important thread data if needed
+            if (thread.messages && Array.isArray(thread.messages) && thread.messages.length > 0) {
+              this.memory?.addMemory(
+                'MEDIUM_TERM',
+                `thread_${threadKey}`,
+                {
+                  messages: thread.messages,
+                  context: thread.context || {}
+                },
+                {
+                  type: 'CONVERSATION_THREAD',
+                  channel: threadKey.split('-')[0],
+                  user: threadKey.split('-')[1]
+                }
+              );
+            }
+            // Remove the thread
+            this.activeThreads.delete(threadKey);
+            logger.debug(`Cleaned up inactive thread: ${threadKey}`);
+          }
+        } catch (threadError) {
+          logger.error(`Error processing thread ${threadKey}:`, threadError);
+        }
+      });
+    } catch (error) {
+      logger.error('Error in cleanupOldThreads:', error);
+    }
+  }
+  // Also add this method that was missing
+  updateMemoryAndRelationships(channel, user, message, response, context) {
+    try {
+      if (!this.memory) {
+        logger.error('Memory system not initialized');
+        return;
       }
 
-      // Format chat context
-      const chatContext = recentMessages
-        .reverse()
-        .map(msg => `${msg.username}: ${msg.message}`)
-        .join('\n');
+      // Create a safe context object
+      const safeContext = {
+        type: 'USER_INTERACTION',
+        user: user?.username || 'unknown',
+        channel: channel || 'unknown',
+        ...(context || {})
+      };
 
-      // Generate autonomous response
+      // Update memory with interaction
+      this.memory.addMemory(
+        'SHORT_TERM',
+        `interaction_${Date.now()}`,
+        {
+          message,
+          response,
+          context: safeContext
+        },
+        safeContext
+      );
+
+      // Update user relationship
+      if (user?.username && this.personality?.userRelationships) {
+        const currentRelationship = this.personality.userRelationships.get(user.username) || {
+          familiarity: 0,
+          rapport: 0,
+          lastInteraction: 0
+        };
+
+        // Increment relationship metrics
+        currentRelationship.familiarity = Math.min(1, currentRelationship.familiarity + 0.1);
+        currentRelationship.rapport = Math.min(1, currentRelationship.rapport + 0.05);
+        currentRelationship.lastInteraction = Date.now();
+
+        this.personality.userRelationships.set(user.username, currentRelationship);
+      }
+
+    } catch (error) {
+      logger.error('Error updating memory and relationships:', error);
+    }
+  }
+
+  // Add this method for better memory management
+  async processMemoryQueue() {
+    try {
+      const memories = await this.memory.getQueuedMemories();
+      for (const memory of memories) {
+        const importance = this.calculateMemoryImportance(memory);
+        if (importance > 0.7) { // Important memory
+          await this.memory.promoteToLongTerm(memory);
+        } else if (importance > 0.4) { // Moderately important
+          await this.memory.promoteToMediumTerm(memory);
+        }
+      }
+    } catch (error) {
+      logger.error('Error processing memory queue:', error);
+    }
+  }
+
+  calculateMemoryImportance(memory) {
+    let importance = 0;
+    
+    // Check user relationship
+    const userRelationship = this.personality?.userRelationships?.get(memory.context?.user);
+    if (userRelationship) {
+      importance += userRelationship.familiarity * 0.3;
+      importance += userRelationship.rapport * 0.2;
+    }
+
+    // Check content relevance
+    if (memory.content?.includes('important') || memory.content?.includes('remember')) {
+      importance += 0.3;
+    }
+
+    // Check interaction type
+    if (memory.type === 'USER_INTERACTION') {
+      importance += 0.2;
+    }
+
+    return Math.min(1, importance);
+  }
+
+  // Update handleMention to use improved systems
+  async handleMention(channel, user, message, msg) {
+    if (!channel || !user) {
+      logger.error('Missing required parameters in handleMention:', { channel, user });
+      return;
+    }
+
+    logger.info(`Processing mention from ${user.username} in ${channel}: ${message}`);
+
+    try {
+      // Get recent messages and conversation history
+      const rawMessages = await MessageLogger.getRecentMessages(channel, 25);
+      const conversationHistory = this.conversationHistory.get(channel) || [];
+      
+      // Update conversation history with new message
+      await this.updateConversationHistory(channel, user, message, msg);
+      
+      // Get channel context
+      const channelContext = this.getChannelContext(channel);
+      channelContext.addMessage({
+        content: message,
+        user: user.username,
+        timestamp: Date.now()
+      }, true);
+
+      // Get thread before building context
+      const thread = this.getOrCreateThread(channel, user);
+      
+      // Update thread with incoming message
+      this.updateThreadContext(thread, message, {
+        type: 'mention',
+        user: user.username,
+        timestamp: Date.now()
+      });
+
+      // Build enhanced context
+      logger.debug('Building enhanced context...');
+      const enhancedContext = await this.buildEnhancedContext(
+        channel.replace('#', ''),
+        {
+          ...user,
+          username: user.username || user.name,
+          displayName: user.displayName || user.username || user.name
+        },
+        message,
+        [...rawMessages, ...conversationHistory]
+      );
+
+      // Update personality and build system prompt
+      const personality = this.updatePersonalityForContext(channel, user, enhancedContext);
+      
+      const systemPrompt = `${getSystemPrompt(user.username)}
+Channel Context: ${JSON.stringify(enhancedContext.channel)}
+Conversation Thread: ${JSON.stringify(thread)}
+User Relationship: ${JSON.stringify(enhancedContext.user.relationship)}
+Recent Memories: ${JSON.stringify(enhancedContext.memory.recentInteractions)}
+Important Context: ${JSON.stringify(enhancedContext.memory.importantContext)}
+
+Personality Traits: ${JSON.stringify(personality)}`;  // Note the closing backtick here
+
+      // Generate response with full context
       const response = await this.anthropic.messages.create({
         model: CLAUDE_MODEL,
         max_tokens: MAX_TOKENS,
-        temperature: 0.9, // Slightly higher for more creative responses
-        system: `${OTHER_PROMPT}\n\nYou are casually joining an ongoing Twitch chat conversation. Keep responses natural and relevant to the recent chat context. Use appropriate 7TV emotes.`,
+        temperature: TEMPERATURE,
+        system: systemPrompt,
         messages: [
           {
             role: "user",
-            content: `Recent chat context:\n${chatContext}\n\nGenerate a natural, contextually appropriate message to join the conversation. Don't use @mentions.`
+            content: JSON.stringify({
+              context: enhancedContext,
+              message: message
+            })
           }
         ]
       });
 
-      const generatedResponse = response.content[0].text;
-      
-      // Send message
-      await this.chatClient.say(channelName, generatedResponse);
-      await MessageLogger.logBotMessage(channelName, generatedResponse);
-      
-      // Update last message time
-      this.lastAutonomousMessage.set(channelName, now);
-      
-      logger.info(`Sent autonomous message in ${channelName}: ${generatedResponse}`);
+      let generatedResponse = response.content[0].text;
+      generatedResponse = generatedResponse
+        .replace(/^@\w+\s+/, '')
+        .replace(/@Revulate\s+/, '')
+        .replace(/@user\s+/, '')
+        .trim();
+
+      logger.debug('Generated response:', generatedResponse);
+
+      // Update thread with bot's response
+      this.updateThreadContext(thread, generatedResponse, {
+        type: 'response',
+        user: 'TatsLuna',
+        timestamp: Date.now()
+      });
+
+      // Send response
+      const prefix = `@${user.displayName} `;
+      await sendSplitMessage(
+        channel,
+        generatedResponse,
+        prefix,
+        this.chatClient,
+        MessageLogger
+      );
+
+      // Cache the response
+      this.setInCache(user.userId, message, generatedResponse);
+
+      // Update memory and relationships
+      await this.updateMemoryAndRelationships(channel, user, message, generatedResponse, enhancedContext);
+
+      // Get relevant memories with importance scoring
+      const relevantMemories = await this.memory.getRelevantMemories({
+        type: 'USER_INTERACTION',
+        user: user.username,
+        channel: channel,
+        importance: 0.4 // Only get memories above this importance threshold
+      });
+
+      // Process memory queue periodically
+      if (Math.random() < 0.1) { // 10% chance
+        await this.processMemoryQueue();
+      }
+
+      logger.info(`Successfully processed mention from ${user.username}`);
+
     } catch (error) {
-      logger.error(`Error generating autonomous message for ${channelName}:`, error);
+      logger.error('Error in handleMention:', {
+        error: error.message,
+        stack: error.stack,
+        channel,
+        user: user?.username,
+        message
+      });
+      
+      // Send fallback response
+      try {
+        const errorResponse = `@${user.displayName} Sorry, I encountered an error: ${error.message}`;
+        await this.chatClient.say(channel, errorResponse);
+        await MessageLogger.logBotMessage(channel, errorResponse);
+      } catch (sendError) {
+        logger.error('Error sending error response:', sendError);
+      }
     }
   }
-}
+} // End of ClaudeHandler class
 
-export function setupClaude(chatClient) {
+export function setupClaude(chatClient, twitchEventManager) {
   logger.info('Setting up Claude handler...');
-  const handler = new ClaudeHandler(chatClient);
-  
-  // Remove the event listener registration from here since we're handling it in index.js
+  const handler = new ClaudeHandler(chatClient, twitchEventManager);
   
   logger.info('Claude handler setup complete');
   

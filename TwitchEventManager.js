@@ -217,9 +217,14 @@ export default class TwitchEventManager extends EventEmitter {
     this.messageLogger = logger;
   }
 
-  async initialize() {
+  async initialize(claudeHandler = null) {
     try {
       logger.info('Starting TwitchEventManager initialization...');
+      
+      if (claudeHandler) {
+        this.setCluadeHandler(claudeHandler);
+      }
+      
       this.setupEventHandlers();
 
       // Get current channels from chatClient
@@ -368,5 +373,11 @@ export default class TwitchEventManager extends EventEmitter {
       logger.error(`Error checking live status for ${channel}:`, error);
       return false; // Return false on error
     }
+  }
+
+  // Add this method to set the Claude handler
+  setCluadeHandler(handler) {
+    this.claudeHandler = handler;
+    logger.info('Claude handler set in TwitchEventManager');
   }
 }
