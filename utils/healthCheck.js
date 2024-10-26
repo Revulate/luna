@@ -17,54 +17,69 @@ function formatHealthLine(name, status) {
 export async function performHealthCheck() {
   logger.startOperation('System health check');
   
-  const health = {
-    // Core Services
-    database: Boolean(serviceRegistry.getService('database')?.db),
-    messageLogger: Boolean(serviceRegistry.getService('messageLogger')),
-    apiClient: Boolean(serviceRegistry.getService('apiClient')),
-    chatClient: Boolean(serviceRegistry.getService('chatClient')),
-    eventManager: Boolean(serviceRegistry.getService('eventManager')),
-    webPanel: Boolean(serviceRegistry.getService('webPanel')),
+  // Increase delay and add retry mechanism
+  const maxRetries = 3;
+  const retryDelay = 2000;
+  
+  for (let i = 0; i < maxRetries; i++) {
+    await new Promise(resolve => setTimeout(resolve, retryDelay));
     
-    // Command Systems
-    commands: Boolean(serviceRegistry.getService('commands')),
-    dvp: Boolean(serviceRegistry.getService('dvp')),
-    claude: Boolean(serviceRegistry.getService('claude')?.handler),
-    gpt: Boolean(serviceRegistry.getService('gpt')?.handler),
-    afk: Boolean(serviceRegistry.getService('afk')?.handler),
-    
-    // Connection States
-    chatConnection: Boolean(serviceRegistry.getService('chatClient')?.isConnected),
-    apiConnection: Boolean(serviceRegistry.getService('apiClient')?.hasScope),
-    
-    // File Systems
-    databaseDir: await checkDirectory('databases'),
-    logsDir: await checkDirectory('logs'),
-    
-    // Additional Services
-    sevenTv: Boolean(serviceRegistry.getService('sevenTv')),
-    steam: Boolean(serviceRegistry.getService('steam')),
-    autonomy: Boolean(serviceRegistry.getService('autonomy')),
-    analytics: Boolean(serviceRegistry.getService('analytics')),
-    messageQueue: Boolean(serviceRegistry.getService('messageQueue')),
-    
-    // Memory Usage
-    memoryUsage: checkMemoryUsage()
-  };
+    const checks = {
+      database: async () => {
+        const db = serviceRegistry.getService('database');
+        return db && db.initialized;
+      },
+      messageLogger: async () => {
+        const msgLogger = serviceRegistry.getService('messageLogger');
+        return msgLogger && msgLogger.initialized;
+      },
+      apiClient: async () => {
+        const client = serviceRegistry.getService('apiClient');
+        return client && typeof client.users?.getUserByName === 'function';
+      },
+      chatClient: async () => {
+        const client = serviceRegistry.getService('chatClient');
+        return client && client.isConnected;
+      },
+      eventManager: async () => {
+        const manager = serviceRegistry.getService('twitchEventManager') || 
+                       serviceRegistry.getService('eventManager');
+        return manager && manager.initialized;
+      },
+      webPanel: async () => {
+        const panel = serviceRegistry.getService('webPanel');
+        return panel && panel.initialized;
+      }
+    };
 
-  // Log results
-  logger.info('Health Check Results:');
-  Object.entries(health).forEach(([service, status]) => {
-    logger.info(formatHealthLine(service, status));
-  });
+    const results = {};
+    let allServicesHealthy = true;
+    
+    for (const [service, check] of Object.entries(checks)) {
+      try {
+        results[service.toLowerCase()] = await check();
+        if (!results[service.toLowerCase()]) {
+          logger.warn(`Service check failed: ${service}`);
+          allServicesHealthy = false;
+        }
+      } catch (error) {
+        logger.error(`Error checking ${service}:`, error);
+        results[service.toLowerCase()] = false;
+        allServicesHealthy = false;
+      }
+    }
 
-  // Log overall status
-  const overallStatus = Object.values(health).every(status => status);
-  logger.info('-'.repeat(35));
-  logger.info(formatHealthLine('overall status', overallStatus));
+    if (allServicesHealthy) {
+      logger.info('All services healthy');
+      return results;
+    }
 
-  logger.endOperation('System health check', overallStatus);
-  return health;
+    if (i === maxRetries - 1) {
+      logger.warn('Health check failed after retries');
+    }
+  }
+
+  return results;
 }
 
 async function checkDirectory(dirName) {

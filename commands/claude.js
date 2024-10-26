@@ -443,7 +443,7 @@ class ConversationContext {
 
 // Update the ClaudeHandler class
 class ClaudeHandler {
-  constructor(chatClient, twitchEventManager) {  // Add twitchEventManager parameter
+  constructor(chatClient, twitchEventManager) {
     logger.startOperation('Initializing ClaudeHandler');
     this.chatClient = chatClient;
     this.twitchEventManager = twitchEventManager;
@@ -451,12 +451,13 @@ class ClaudeHandler {
       apiKey: config.anthropic.apiKey
     });
     
-    // Initialize caches
+    // Initialize caches and maps
     this.cache = new NodeCache({ stdTTL: CACHE_TTL_SECONDS });
     this.lastResponseTime = new Map();
     this.lastAutonomousMessage = new Map();
     this.activeThreads = new Map();
     this.threadTimeout = CONVERSATION_EXPIRY;
+    this.memory = new EnhancedMemory();
     
     logger.debug('Claude handler initialized with settings', {
       model: CLAUDE_MODEL,
@@ -513,37 +514,17 @@ class ClaudeHandler {
     }
   }
 
-  // ... rest of the class with similar logging
-}
+  async handleMention(channel, user, message) {
+    try {
+      // Get system prompt based on user
+      const systemPrompt = getSystemPrompt(user.username);
 
-export function setupClaude(chatClient, twitchEventManager) {
-  logger.startOperation('Setting up Claude command');
-  const handler = new ClaudeHandler(chatClient, twitchEventManager);
-  
-  logger.info('Claude handler setup complete');
-  
-  return {
-    claude: async (context) => {
-      try {
-        const { channel, user, args } = context;
-        if (!args || args.length === 0) {
-          const response = `@${user.username}, please provide a message after the #claude command.`;
-          await MessageLogger.logBotMessage(channel, response);
-          await context.say(response);
-          return;
-        }
+      // Get or create conversation thread
+      const thread = this.getOrCreateThread(channel, user);
 
-        await handler.handleClaudeCommand(context);
-      } catch (error) {
-        logger.error(`Error in Claude command: ${error}`);
-        const errorResponse = `@${context.user.username}, Sorry, an error occurred.`;
-        await MessageLogger.logBotMessage(context.channel, errorResponse);
-        await context.say(errorResponse);
-      }
-    },
-    handler
-  };
-}
+      // Build enhanced context
+      const enhancedContext = await this.buildEnhancedContext(channel, user, message);
+
       // Generate response with full context
       const response = await this.anthropic.messages.create({
         model: CLAUDE_MODEL,
@@ -579,13 +560,13 @@ export function setupClaude(chatClient, twitchEventManager) {
 
       // Send response
       const prefix = `@${user.displayName} `;
-        await sendSplitMessage(
-          channel,
+      await sendSplitMessage(
+        channel,
         generatedResponse,
         prefix,
-          this.chatClient,
-          MessageLogger
-        );
+        this.chatClient,
+        MessageLogger
+      );
 
       // Cache the response
       this.setInCache(user.userId, message, generatedResponse);
@@ -593,21 +574,7 @@ export function setupClaude(chatClient, twitchEventManager) {
       // Update memory and relationships
       await this.updateMemoryAndRelationships(channel, user, message, generatedResponse, enhancedContext);
 
-      // Get relevant memories with importance scoring
-      const relevantMemories = await this.memory.getRelevantMemories({
-        type: 'USER_INTERACTION',
-        user: user.username,
-        channel: channel,
-        importance: 0.4 // Only get memories above this importance threshold
-      });
-
-      // Process memory queue periodically
-      if (Math.random() < 0.1) { // 10% chance
-        await this.processMemoryQueue();
-      }
-
       logger.info(`Successfully processed mention from ${user.username}`);
-
     } catch (error) {
       logger.error('Error in handleMention:', {
         error: error.message,
@@ -627,37 +594,6 @@ export function setupClaude(chatClient, twitchEventManager) {
       }
     }
   }
-} // End of ClaudeHandler class
-
-// Use a single export at the end of the file
-export function setupClaude(chatClient, twitchEventManager) {
-  logger.info('Setting up Claude handler...');
-  const handler = new ClaudeHandler(chatClient, twitchEventManager);
-  
-  logger.info('Claude handler setup complete');
-  
-  return {
-    claude: async (context) => {
-      try {
-        const { channel, user, args } = context;
-        if (!args || args.length === 0) {
-          const response = `@${user.username}, please provide a message after the #claude command.`;
-          await MessageLogger.logBotMessage(channel, response);
-          await context.say(response);
-          return;
-        }
-
-        await handler.handleClaudeCommand(context);
-      } catch (error) {
-        logger.error(`Error in Claude command: ${error}`);
-        const errorResponse = `@${context.user.username}, Sorry, an error occurred.`;
-        await MessageLogger.logBotMessage(context.channel, errorResponse);
-        await context.say(errorResponse);
-      }
-    },
-    handler
-  };
-}
 
   calculateMemoryImportance(memory) {
     let importance = 0;
@@ -681,9 +617,11 @@ export function setupClaude(chatClient, twitchEventManager) {
 
     return Math.min(1, importance);
   }
-} // End of ClaudeHandler class
 
-// Use a single export at the end of the file
+  // ... keep all other class methods ...
+}
+
+// Single export at the end
 export function setupClaude(chatClient, twitchEventManager) {
   logger.info('Setting up Claude handler...');
   const handler = new ClaudeHandler(chatClient, twitchEventManager);

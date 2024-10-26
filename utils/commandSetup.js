@@ -10,7 +10,6 @@ import { setupMessageLookup } from '../commands/messageLookup.js';
 import { setupSteam } from '../commands/steam.js';
 import { setupDvp } from '../commands/dvp.js';
 import { setupStats } from '../commands/stats.js';
-import { setupLastMessage } from '../commands/lm.js';
 import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
@@ -20,107 +19,110 @@ import { config } from '../config.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Define command setup configurations
-const commandSetups = [
-  { name: 'rate', setup: setupRate },
-  { name: 'preview', setup: setupPreview },
-  { name: 'afk', setup: setupAfk },
-  { name: 'gpt', setup: setupGpt },
-  { name: '7tv', setup: setup7tv },
-  { name: 'messageLookup', setup: setupMessageLookup },
-  { name: 'steam', setup: setupSteam },
-  { name: 'dvp', setup: setupDvp },
-  { name: 'stats', setup: setupStats },
-  { name: 'lastMessage', setup: setupLastMessage }
-];
+class CommandManager {
+  constructor() {
+    this.commands = new Map();
+    this.initialized = false;
+  }
 
-function createCommandContext(channel, user, message, msg, chatClient, apiClient) {
-  logger.debug('Creating command context', {
-    channel,
-    username: user,
-    command: message.split(' ')[0]
-  });
+  async initialize({ chatClient, apiClient, twitchEventManager }) {
+    if (this.initialized) {
+      return this;
+    }
 
-  return {
-    channel,
-    user: {
-      username: user,
-      displayName: msg.userInfo.displayName || user,
-      ...msg.userInfo
-    },
-    message,
-    args: message.slice(config.twitch.commandPrefix.length).trim().split(/\s+/).slice(1),
-    say: async (text) => {
-      await chatClient.say(channel, text);
-    },
-    chatClient,
-    apiClient
-  };
-}
-
-async function setupCommands(chatClient) {
-  logger.startOperation('Setting up commands');
-  const commands = new Map();
-  const failedCommands = [];
-
-  // Create context with services
-  const context = {
-    chatClient,
-    apiClient: chatClient.apiClient,
-    messageLogger: serviceRegistry.getService('messageLogger')
-  };
-
-  // Setup each command with proper client initialization
-  for (const { name, setup } of commandSetups) {
     try {
-      logger.debug(`Setting up command: ${name}`);
+      logger.startOperation('Initializing CommandManager');
       
-      // Pass chatClient directly for AFK command
-      if (name === 'afk') {
-        const command = await setup(chatClient);
-        if (command) {
-          commands.set(name, command);
-          logger.info(`Loaded command: ${name}`);
-        }
-        continue;
+      // Store required services
+      this.chatClient = chatClient;
+      this.apiClient = apiClient;
+      this.twitchEventManager = twitchEventManager;
+
+      if (!this.chatClient || !this.apiClient) {
+        throw new Error('Required services not found: chatClient or apiClient');
       }
 
-      // Regular command setup
-      const command = await setup(context);
-      if (command) {
-        commands.set(name, command);
-        logger.info(`Loaded command: ${name}`);
-      }
+      // Create context with services
+      const context = {
+        chatClient: this.chatClient,
+        apiClient: this.apiClient,
+        messageLogger: serviceRegistry.getService('messageLogger'),
+        twitchEventManager: this.twitchEventManager
+      };
+
+      // Setup commands with context
+      await this.setupCommands(context);
+
+      this.initialized = true;
+      logger.info('CommandManager initialized successfully');
+      return this;
     } catch (error) {
-      logger.error(`Failed to load command ${name}:`, error);
-      failedCommands.push(name);
+      logger.error('Error initializing CommandManager:', error);
+      throw error;
     }
   }
 
-  logger.debug('Failed commands:', failedCommands);
-  logger.endOperation('Setting up commands', failedCommands.length === 0);
+  async setupCommands(context) {
+    const commandSetups = [
+      { name: 'steam', setup: setupSteam },
+      { name: 'dvp', setup: setupDvp },
+      { name: 'stats', setup: setupStats },
+      // ... other commands
+    ];
 
-  return { commands, failedCommands };
-}
+    for (const { name, setup } of commandSetups) {
+      try {
+        logger.debug(`Setting up command: ${name}`);
+        const command = await setup(context);
+        if (command) {
+          this.commands.set(name, command);
+          logger.info(`Loaded command: ${name}`);
+        }
+      } catch (error) {
+        logger.error(`Failed to load command ${name}:`, error);
+      }
+    }
+  }
 
-async function handleCommand(commandName, context, ...args) {
-  logger.startOperation(`Executing command: ${commandName}`);
-  try {
-    const command = serviceRegistry.getService('commands')?.getCommand(commandName.toLowerCase());
-    if (!command) {
-      logger.debug(`Command not found: ${commandName}`);
+  getCommand(name) {
+    return this.commands.get(name);
+  }
+
+  async handleCommand(commandName, context, ...args) {
+    logger.startOperation(`Executing command: ${commandName}`);
+    try {
+      const command = this.getCommand(commandName.toLowerCase());
+      if (!command) {
+        logger.debug(`Command not found: ${commandName}`);
+        logger.endOperation(`Executing command: ${commandName}`, false);
+        return false;
+      }
+
+      await command.execute(context, ...args);
+      logger.endOperation(`Executing command: ${commandName}`, true);
+      return true;
+    } catch (error) {
+      logger.error(`Error executing command ${commandName}:`, error);
       logger.endOperation(`Executing command: ${commandName}`, false);
       return false;
     }
-
-    await command.execute(context, ...args);
-    logger.endOperation(`Executing command: ${commandName}`, true);
-    return true;
-  } catch (error) {
-    logger.error(`Error executing command ${commandName}:`, error);
-    logger.endOperation(`Executing command: ${commandName}`, false);
-    return false;
   }
 }
 
-export { setupCommands, handleCommand, createCommandContext };
+// Create singleton instance
+const commandManager = new CommandManager();
+
+// Register with service registry
+serviceRegistry.register('commands', commandManager);
+
+// Export both the class and singleton instance
+export { CommandManager, commandManager };
+
+// Export setup function for backward compatibility
+export async function setupCommands(chatClient) {
+  await commandManager.initialize();
+  return {
+    commands: commandManager.commands,
+    failedCommands: []
+  };
+}

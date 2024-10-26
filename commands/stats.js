@@ -3,7 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import logger from '../utils/logger.js';
 import { MessageLogger } from '../utils/MessageLogger.js';
-import TwitchEventManager from '../utils/TwitchEventManager.js';
+import { TwitchEventManager, twitchEventManager } from '../utils/TwitchEventManager.js';
 
 class Stats {
   constructor(bot) {

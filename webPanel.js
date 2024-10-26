@@ -4,186 +4,169 @@ import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import logger from './utils/logger.js';
-import cors from 'cors';
+import { serviceRegistry } from './utils/serviceRegistry.js';
+import { config } from './config.js';  // Add config import
 
-export class WebPanel {
-  constructor(initialPort = 3069) {
-    this.initialPort = initialPort;
-    this.currentPort = initialPort;
-    this.server = null;
-    this.io = null;
-    
-    // Add initialization logging
-    logger.debug('WebPanel constructor initialized', {
-      initialPort,
-      currentPort: this.currentPort
-    });
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+class WebPanel {
+  constructor() {
+    logger.startOperation('Initializing WebPanel');
+    this.initialized = false;
+    this.app = express();
+    this.server = http.createServer(this.app);
+    this.io = new Server(this.server);
+    this.port = process.env.WEB_PORT || config.webPanel?.port || 3069; // Use config or fallback
+    logger.debug('WebPanel constructor initialized');
   }
 
-  async initialize({ chatClient, messageLogger, eventManager }) {
-    logger.startOperation('WebPanel initialization');
-    
-    this.chatClient = chatClient;
-    this.messageLogger = messageLogger;
-    this.eventManager = eventManager;
-
-    const ports = [this.initialPort, 3070, 3071, 3072];
-    
-    for (const port of ports) {
-      try {
-        this.currentPort = port;
-        await this.startServer();
-        logger.info(`Web panel started on port ${port}`);
-        logger.endOperation('WebPanel initialization', true);
-        return true;
-      } catch (error) {
-        if (error.code === 'EADDRINUSE') {
-          logger.warn(`Port ${port} in use, trying next port...`);
-          continue;
-        }
-        logger.error('Failed to start web panel:', { error, port });
-        throw error;
-      }
+  async initialize() {
+    if (this.initialized) {
+      return this;
     }
-    
-    const error = new Error('All web panel ports are in use');
-    logger.error('Web panel initialization failed:', { error });
-    throw error;
-  }
 
-  async startServer() {
-    logger.startOperation('Starting web server');
     try {
-      const port = this.currentPort;
-      if (!port) {
-        throw new Error('No valid port specified');
-      }
+      // Get required services
+      this.messageLogger = serviceRegistry.getService('messageLogger');
+      this.twitchEventManager = serviceRegistry.getService('twitchEventManager');
+      this.database = serviceRegistry.getService('database');
 
-      // Import dependencies
-      const express = await import('express');
-      const { Server } = await import('socket.io');
-      const http = await import('http');
-      const cors = await import('cors');
-      
-      this.app = express.default();
-      this.server = http.createServer(this.app);
-      
-      // Initialize Socket.IO with CORS options
-      this.io = new Server(this.server, {
-        cors: {
-          origin: "*",
-          methods: ["GET", "POST"]
-        }
-      });
-
-      // Setup middleware
-      this.app.use(cors.default());
-      this.app.use(express.static('public'));
+      // Setup express middleware
+      this.app.use(express.static(path.join(__dirname, 'public')));
       this.app.use(express.json());
 
-      // Setup socket handlers
-      this.io.on('connection', async (socket) => {
-        logger.info('Client connected', { 
-          socketId: socket.id,
-          address: socket.handshake.address 
-        });
+      // Setup routes
+      this.setupRoutes();
 
-        socket.on('sendMessage', async (data) => {
-          const startTime = Date.now();
-          try {
-            const { channel, message } = data;
-            logger.debug('Processing chat message', { channel, socketId: socket.id });
-            
-            await this.chatClient.say(channel, message);
-            
-            const botMessageData = {
-              channel: channel,
-              userId: '0',
-              username: 'TatsLuna',
-              message: message,
-              timestamp: new Date().toISOString(),
-              badges: {},
-              color: '#6441A5'
-            };
-            
-            await this.messageLogger.logMessage(channel, botMessageData);
-            this.io.emit('chatMessage', botMessageData);
-            
-            logger.logPerformance('Message processing', Date.now() - startTime);
-          } catch (error) {
-            logger.error('Error sending message:', { error, data });
-            socket.emit('error', 'Failed to send message');
-          }
-        });
+      // Setup Socket.IO events
+      this.setupSocketEvents();
 
-        socket.on('disconnect', () => {
-          logger.info('Client disconnected', { socketId: socket.id });
-        });
-
-        socket.on('error', (error) => {
-          logger.error('Socket error:', { error, socketId: socket.id });
-          socket.emit('error', 'An error occurred');
-        });
-
-        // Send initial data
-        try {
-          const channels = this.eventManager.getChannels();
-          socket.emit('channels', channels);
-          
-          // Send recent messages for each channel
-          for (const channel of channels) {
-            const messages = await this.messageLogger.getRecentMessages(channel);
-            socket.emit('recentMessages', { channel, messages });
-          }
-          
-          logger.debug('Initial data sent to client', { 
-            socketId: socket.id,
-            channelCount: channels.length 
-          });
-        } catch (error) {
-          logger.error('Error sending initial data:', { error, socketId: socket.id });
-        }
-      });
-
-      // Simplified port listening
+      // Start server with configured port
       await new Promise((resolve, reject) => {
-        this.server.listen(port, () => {
-          this.port = port;
-          this.isListening = true;
-          logger.info(`Web panel listening on port ${port}`);
-          logger.endOperation('Starting web server', true);
+        this.server.listen(this.port, () => {
+          logger.info(`Web panel listening on port ${this.port}`);
           resolve();
-        }).on('error', (err) => {
-          logger.error('Server listen error:', { error: err, port });
-          reject(err);
+        }).on('error', (error) => {
+          if (error.code === 'EADDRINUSE') {
+            logger.error(`Port ${this.port} is already in use. Please check if another instance is running.`);
+          }
+          reject(error);
         });
       });
 
-      return true;
+      this.initialized = true;
+      logger.info('WebPanel initialized successfully');
+      return this;
     } catch (error) {
-      logger.endOperation('Starting web server', false);
+      logger.error('Error initializing WebPanel:', error);
       throw error;
     }
   }
 
-  async close() {
-    logger.startOperation('Closing web server');
-    if (this.isListening) {
-      await new Promise((resolve) => {
-        this.server.close(() => {
-          this.isListening = false;
-          logger.info('Web server closed successfully');
-          logger.endOperation('Closing web server', true);
-          resolve();
-        });
+  setupRoutes() {
+    // Main dashboard route
+    this.app.get('/', (req, res) => {
+      res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    });
+
+    // API routes
+    this.app.get('/api/channels', async (req, res) => {
+      try {
+        const channels = this.twitchEventManager.getChannels();
+        res.json({ channels });
+      } catch (error) {
+        logger.error('Error fetching channels:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+
+    this.app.get('/api/stats', async (req, res) => {
+      try {
+        const stats = await this.getSystemStats();
+        res.json(stats);
+      } catch (error) {
+        logger.error('Error fetching stats:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    });
+  }
+
+  setupSocketEvents() {
+    this.io.on('connection', (socket) => {
+      logger.info('Client connected to web panel');
+
+      socket.on('join_channel', async (channel) => {
+        try {
+          await this.twitchEventManager.joinChannel(channel);
+          socket.emit('channel_joined', { channel, success: true });
+        } catch (error) {
+          logger.error('Error joining channel:', error);
+          socket.emit('channel_joined', { channel, success: false, error: error.message });
+        }
+      });
+
+      socket.on('leave_channel', async (channel) => {
+        try {
+          await this.twitchEventManager.leaveChannel(channel);
+          socket.emit('channel_left', { channel, success: true });
+        } catch (error) {
+          logger.error('Error leaving channel:', error);
+          socket.emit('channel_left', { channel, success: false, error: error.message });
+        }
+      });
+
+      socket.on('disconnect', () => {
+        logger.info('Client disconnected from web panel');
+      });
+    });
+
+    // Forward chat messages to connected clients
+    if (this.messageLogger) {
+      this.messageLogger.on('message', (messageData) => {
+        this.io.emit('chat_message', messageData);
       });
     }
   }
 
-  formatBytes(bytes) {
-    if (!bytes) return '0 B';
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
+  async getSystemStats() {
+    try {
+      const uptime = process.uptime();
+      const memoryUsage = process.memoryUsage();
+      const channels = this.twitchEventManager.getChannels();
+      
+      return {
+        uptime,
+        memoryUsage: {
+          heapUsed: memoryUsage.heapUsed,
+          heapTotal: memoryUsage.heapTotal,
+          rss: memoryUsage.rss
+        },
+        channels: channels.length,
+        connectedClients: this.io.engine.clientsCount
+      };
+    } catch (error) {
+      logger.error('Error getting system stats:', error);
+      throw error;
+    }
+  }
+
+  // Method to broadcast updates to all connected clients
+  broadcastUpdate(event, data) {
+    this.io.emit(event, data);
+  }
+
+  // Method to send update to specific client
+  sendUpdate(socketId, event, data) {
+    this.io.to(socketId).emit(event, data);
   }
 }
+
+// Create singleton instance
+const webPanel = new WebPanel();
+
+// Register with service registry immediately
+serviceRegistry.register('webPanel', webPanel);
+
+// Export both the class and singleton instance
+export { WebPanel, webPanel };

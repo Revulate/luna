@@ -3,68 +3,56 @@ import { EventEmitter } from 'events';
 import logger from './logger.js';
 import { config } from '../config.js';
 import { EventSubWsListener } from '@twurple/eventsub-ws';
+import { serviceRegistry } from './serviceRegistry.js';
 
-export default class TwitchEventManager extends EventEmitter {
-  constructor(apiClient, chatClient, initialChannels = []) {
+class TwitchEventManager extends EventEmitter {
+  constructor() {
     super();
     logger.startOperation('Initializing TwitchEventManager');
-    this.apiClient = apiClient;
-    this.chatClient = chatClient;
-    this.botUsername = config.twitch.botUsername.toLowerCase();
+    this.initialized = false;
+    this.channels = new Set();
     this.streamMonitors = new Map();
     this.lastStreamAnalysis = new Map();
+    this.botUsername = config.twitch.botUsername?.toLowerCase();
     
-    logger.debug('Constructor parameters:', { 
-      initialChannels,
-      botUsername: this.botUsername 
-    });
-    
-    // Ensure channels are properly formatted and non-empty
-    this.channels = new Set(
-      initialChannels
-        .filter(channel => channel && channel.trim())
-        .map(channel => channel.toLowerCase().replace(/^#/, ''))
-    );
-    
-    this.messageLogger = null;
-    this.eventSubListener = null;
-    
-    // Initialize EventSub listener
-    this.eventSubListener = new EventSubWsListener({
-      apiClient: this.apiClient,
-      strictHostCheck: false
-    });
-
-    // Add API client to chat client for other modules
-    if (this.chatClient && this.apiClient) {
-      this.chatClient.apiClient = this.apiClient;
-    }
-
-    logger.info('TwitchEventManager initialized with channels:', 
-      Array.from(this.channels).join(', ')
-    );
-    logger.endOperation('Initializing TwitchEventManager', true);
+    // Register both service names for compatibility
+    serviceRegistry.register('eventManager', this);
+    serviceRegistry.register('twitchEventManager', this);
+    logger.debug('TwitchEventManager registered in service registry');
   }
 
-  async initialize() {
+  async initialize({ chatClient, apiClient, messageLogger }) {
+    if (this.initialized) {
+      return this;
+    }
+
     try {
       logger.info('Starting TwitchEventManager initialization...');
 
-      // Validate required clients
-      if (!this.apiClient || !this.chatClient) {
-        throw new Error('Missing required clients in TwitchEventManager');
-      }
+      // Store services
+      this.chatClient = chatClient;
+      this.apiClient = apiClient;
+      this.messageLogger = messageLogger;
 
       // Setup event handlers first
       this.setupEventHandlers();
-      
-      // Setup EventSub subscriptions
-      await this.setupEventSub();
-      
-      // Start stream monitoring
+
+      // Initialize EventSub listener
+      this.eventSubListener = new EventSubWsListener({
+        apiClient: this.apiClient
+      });
+
+      // Setup channel monitoring
       await this.startStreamMonitoring();
-      
+
+      this.initialized = true;
       logger.info('TwitchEventManager initialization complete');
+      
+      // Re-register with initialized state
+      serviceRegistry.register('eventManager', this);
+      serviceRegistry.register('twitchEventManager', this);
+
+      return this;
     } catch (error) {
       logger.error('Error initializing TwitchEventManager:', error);
       throw error;
@@ -202,8 +190,8 @@ export default class TwitchEventManager extends EventEmitter {
       throw new Error('Chat client not initialized');
     }
 
-    // Use addListener instead of on for Twurple v7
-    this.chatClient.addListener('message', async (channel, user, message, msg) => {
+    // Fix message handling
+    this.chatClient.onMessage(async (channel, user, message, msg) => {
       try {
         logger.debug(`Received message: ${message}`);
         
@@ -215,7 +203,7 @@ export default class TwitchEventManager extends EventEmitter {
           logger.debug(`Parsed command: ${commandName}, args: ${args.join(', ')}`);
           
           this.emit('command', {
-            channel,
+            channel: channel.replace('#', ''),
             user: {
               username: user,
               ...msg.userInfo,
@@ -229,7 +217,7 @@ export default class TwitchEventManager extends EventEmitter {
             apiClient: this.apiClient,
             say: async (text) => {
               if (this.messageLogger) {
-                await this.messageLogger.logBotMessage(channel, text);
+                await this.messageLogger.logUserMessage(channel.replace('#', ''), user, text);
               }
               await this.chatClient.say(channel, text);
             }
@@ -242,20 +230,33 @@ export default class TwitchEventManager extends EventEmitter {
           username: user,
           message: message,
           badges: msg.userInfo.badges,
-          color: msg.userInfo.color
+          color: msg.userInfo.color,
+          timestamp: new Date().toISOString()
         };
 
+        // Emit chat message event
         this.emit('chatMessage', messageData);
 
+        // Log message using MessageLogger
         if (this.messageLogger) {
-          await this.messageLogger.logMessage(channel.replace('#', ''), messageData);
+          await this.messageLogger.logUserMessage(
+            messageData.channel,
+            messageData.username,
+            messageData.message,
+            {
+              userId: messageData.userId,
+              badges: messageData.badges,
+              color: messageData.color
+            }
+          );
         }
       } catch (error) {
         logger.error('Error handling chat message:', error);
       }
     });
 
-    this.chatClient.addListener('join', (channel, username) => {
+    // Update other event handlers to use new Twurple v7 syntax
+    this.chatClient.onJoin((channel, user) => {
       const channelName = channel.replace(/^#/, '').toLowerCase();
       if (!this.channels.has(channelName)) {
         this.channels.add(channelName);
@@ -264,26 +265,25 @@ export default class TwitchEventManager extends EventEmitter {
       }
     });
 
-    this.chatClient.addListener('part', (channel, username) => {
+    this.chatClient.onPart((channel, user) => {
       const channelName = channel.replace(/^#/, '').toLowerCase();
       this.channels.delete(channelName);
       logger.info(`Left channel: ${channelName}`);
       this.emit('channelLeft', channelName);
     });
 
-    // Update error handling for Twurple v7
-    this.chatClient.addListener('authenticationFailure', (message) => {
-      logger.error('Authentication failure:', message);
-      this.emit('error', new Error(`Authentication failure: ${message}`));
+    this.chatClient.onAuthenticationFailure((text) => {
+      logger.error('Authentication failure:', text);
+      this.emit('error', new Error(`Authentication failure: ${text}`));
     });
 
-    this.chatClient.addListener('disconnected', (manually, reason) => {
+    this.chatClient.onDisconnect((manually, reason) => {
       logger.error('Chat disconnected:', { manually, reason });
       this.emit('error', new Error(`Chat disconnected: ${reason}`));
     });
 
     // Add general error handling through EventEmitter
-    this.addListener('error', (error) => {
+    this.on('error', (error) => {
       logger.error('TwitchEventManager error:', error);
     });
 
@@ -515,4 +515,14 @@ export default class TwitchEventManager extends EventEmitter {
     if (this.isVip(userInfo)) return 'vip';
     return 'user';
   }
+
+  getManager() {
+    return this;
+  }
 }
+
+// Create singleton instance
+const twitchEventManager = new TwitchEventManager();
+
+// Export both the class and singleton instance
+export { TwitchEventManager, twitchEventManager };

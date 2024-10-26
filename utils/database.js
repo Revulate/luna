@@ -2,17 +2,18 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs/promises';
 import logger from './logger.js';
+import { serviceRegistry } from './serviceRegistry.js';
 
 class DatabaseManager {
-  constructor(db) {
+  constructor() {
     logger.startOperation('Initializing DatabaseManager');
-    this.db = db;
     this.initialized = false;
+    this.db = null;
+    this.messageDb = null;
     logger.debug('DatabaseManager constructor initialized');
   }
 
   async initialize() {
-    // Prevent multiple initializations
     if (this.initialized) {
       logger.debug('Database already initialized, skipping');
       return this;
@@ -23,25 +24,39 @@ class DatabaseManager {
       const dbDir = path.join(process.cwd(), 'databases');
       await fs.mkdir(dbDir, { recursive: true });
       
-      const dbPath = path.join(dbDir, 'bot.db');
-      this.db = new Database(dbPath, {
+      // Initialize both main and message databases
+      const mainDbPath = path.join(dbDir, 'bot.db');
+      const messageDbPath = path.join(dbDir, 'messages.db');
+
+      this.db = new Database(mainDbPath, {
         verbose: logger.debug.bind(logger),
-        fileMustExist: false,
-        timeout: 5000,
-        readonly: false,
-        strictTables: true
+        fileMustExist: false
       });
 
-      // Enable foreign keys
+      this.messageDb = new Database(messageDbPath, {
+        verbose: logger.debug.bind(logger),
+        fileMustExist: false
+      });
+
+      // Enable WAL mode and foreign keys for both databases
+      this.db.pragma('journal_mode = WAL');
       this.db.pragma('foreign_keys = ON');
-      
+      this.messageDb.pragma('journal_mode = WAL');
+      this.messageDb.pragma('foreign_keys = ON');
+
       await this.createBaseTables();
       await this.createTwitchTables();
+      await this.createMessageTables();
       await this.createIndexes();
       await this.checkAndRepairDatabase();
+      await this.prepareStatements();
+      
+      // Register the database service
+      serviceRegistry.register('database', this);
       
       this.initialized = true;
       logger.info('Database initialized successfully');
+      
       return this;
     } catch (error) {
       logger.error('Error initializing database:', error);
@@ -344,20 +359,91 @@ class DatabaseManager {
       logger.error('Error during database check and repair:', error);
     }
   }
+
+  // Add new method for message-specific tables
+  async createMessageTables() {
+    const tables = [
+      `CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        username TEXT NOT NULL,
+        message TEXT NOT NULL,
+        timestamp DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+      )`,
+      
+      `CREATE TABLE IF NOT EXISTS message_lookup (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        message_id INTEGER NOT NULL,
+        lookup_type TEXT NOT NULL,
+        lookup_value TEXT NOT NULL,
+        timestamp DATETIME DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now')),
+        FOREIGN KEY (message_id) REFERENCES messages(id),
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+      )`
+    ];
+
+    for (const table of tables) {
+      this.messageDb.prepare(table).run();
+    }
+  }
+
+  // Update getUserMessages to work with both old and new formats
+  async getUserMessages(channel, username, limit = 100) {
+    try {
+      // Try new format first
+      const messages = await this.messageDb.prepare(`
+        SELECT * FROM messages 
+        WHERE channel = ? AND username = ? 
+        ORDER BY timestamp DESC 
+        LIMIT ?
+      `).all(channel, username, limit);
+
+      if (messages.length > 0) {
+        return messages;
+      }
+
+      // Fall back to old format if no messages found
+      return await this.db.prepare(`
+        SELECT * FROM channel_messages 
+        WHERE channel = ? AND username = ? 
+        ORDER BY timestamp DESC 
+        LIMIT ?
+      `).all(channel, username, limit);
+    } catch (error) {
+      logger.error('Error getting user messages:', error);
+      return [];
+    }
+  }
+
+  // Add method to handle message logging
+  async logMessage(channel, username, message, userId, context = {}) {
+    try {
+      const timestamp = new Date().toISOString();
+      return this.messageDb.prepare(`
+        INSERT INTO messages (channel, user_id, username, message, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(channel, userId, username, message, timestamp);
+    } catch (error) {
+      logger.error('Error logging message:', error);
+      throw error;
+    }
+  }
 }
 
-// Create a singleton instance
+// Create and export singleton instance
 const dbManager = new DatabaseManager();
 
-// Export both the class and the singleton instance
-export { DatabaseManager };  // Named export for the class
-export default dbManager;    // Default export for the singleton instance
+// Export both the class and singleton
+export { DatabaseManager };
+export default dbManager;
 
-// Add named exports for specific functions
-export const getUserHistory = (userId, limit) => dbManager.getUserHistory(userId, limit);
-export const updateUserHistory = (userId, message, context) => dbManager.updateUserHistory(userId, message, context);
-
-// Export common query methods
-export const runQuery = (query, params) => dbManager.run(query, params);
-export const getQuery = (query, params) => dbManager.get(query, params);
-export const allQuery = (query, params) => dbManager.all(query, params);
+// Export common functions
+export const getUserHistory = (...args) => dbManager.getUserHistory(...args);
+export const updateUserHistory = (...args) => dbManager.updateUserHistory(...args);
+export const runQuery = (...args) => dbManager.run(...args);
+export const getQuery = (...args) => dbManager.get(...args);
+export const allQuery = (...args) => dbManager.all(...args);

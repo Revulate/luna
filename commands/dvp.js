@@ -15,7 +15,7 @@ import JSONStream from 'jsonstream/index.js';
 import { pipeline } from 'stream/promises';
 import { config } from '../config.js';
 import path from 'path';
-import TwitchEventManager from '../utils/TwitchEventManager.js'; // Import TwitchEventManager
+import { TwitchEventManager, twitchEventManager } from '../utils/TwitchEventManager.js';
 import { authenticate } from '@google-cloud/local-auth';
 import fs from 'fs';
 import { MessageLogger } from '../utils/MessageLogger.js';
@@ -59,10 +59,17 @@ class DVP {
       const authProvider = new AppTokenAuthProvider(config.twitch.clientId, config.twitch.clientSecret);
       this.apiClient = new ApiClient({ authProvider });
       
-      // Get TwitchEventManager from service registry
-      this.twitchEventManager = serviceRegistry.getService('twitchEventManager')?.manager;
+      // Get TwitchEventManager from service registry - Fix the incorrect access
+      this.twitchEventManager = serviceRegistry.getService('twitchEventManager');
+      if (!this.twitchEventManager) {
+        logger.warn('TwitchEventManager not available, retrying with alternative name...');
+        this.twitchEventManager = serviceRegistry.getService('eventManager');
+      }
+
       if (!this.twitchEventManager) {
         logger.warn('TwitchEventManager not available, some features may be limited');
+      } else {
+        logger.debug('Successfully connected to TwitchEventManager');
       }
 
       // Initialize Google Sheets
