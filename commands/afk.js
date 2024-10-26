@@ -1,11 +1,12 @@
-import { runQuery, getQuery, allQuery } from '../database.js';
-import logger from '../logger.js';
+import { runQuery, getQuery, allQuery } from '../utils/database.js';
+import logger from '../utils/logger.js';
 import Database from 'better-sqlite3';
 import path from 'path';
-import MessageLogger from '../MessageLogger.js';
+import { MessageLogger } from '../utils/MessageLogger.js';
 
 class AFK {
   constructor(chatClient) {
+    logger.startOperation('Initializing AFK Handler');
     this.chatClient = chatClient;
     this.db = null;
     this.statements = {};
@@ -35,6 +36,7 @@ class AFK {
       working: 'working',
       bedge: 'sleeping'
     };
+    logger.debug('AFK Handler initialized with status messages');
   }
 
   getUserKey(userId, channel) {
@@ -43,6 +45,8 @@ class AFK {
 
   async handleAfkCommand(context) {
     const { channel, user, args, command = 'afk' } = context;
+    logger.startOperation(`Processing AFK command for ${user.username}`);
+    
     if (!this.initialized) {
       logger.error('AFK module not initialized');
       return;
@@ -78,7 +82,8 @@ class AFK {
 
         await MessageLogger.logBotMessage(channel, response);
         await context.say(response);
-        return; // Return early to prevent setting new AFK status
+        logger.endOperation(`Processing AFK command for ${user.username}`, true);
+        return;
       }
 
       // If not already AFK, set new AFK status
@@ -114,12 +119,14 @@ class AFK {
       const response = `@${username} is now ${fullReason}`;
       await MessageLogger.logBotMessage(channel, response);
       await context.say(response);
+      logger.endOperation(`Processing AFK command for ${user.username}`, true);
     } catch (error) {
       logger.error(`Error in AFK command: ${error}`);
       const errorResponse = `@${username}, an error occurred while setting your AFK status.`;
       await MessageLogger.logBotMessage(channel, errorResponse);
       await context.say(errorResponse);
       await this.clearAfkStatus(userId, cleanChannel);
+      logger.endOperation(`Processing AFK command for ${user.username}`, false);
     }
   }
 
@@ -265,7 +272,7 @@ class AFK {
         CREATE INDEX IF NOT EXISTS idx_return_time ON afk_status(return_time);
       `);
 
-      // Prepare all statements at once
+      // Prepare statements
       this.statements = {
         getActiveAfk: this.db.prepare(`
           SELECT * FROM afk_status
@@ -295,14 +302,16 @@ class AFK {
         `)
       };
 
-      // Modified message handler
-      if (this.chatClient) {
-        this.chatClient.onMessage(async (channel, user, message, msg) => {
-          if (this.isAfkCommand(message)) {
-            return;
-          }
+      // Update event handling to use Twurple v7's correct method
+      if (this.chatClient && typeof this.chatClient.say === 'function') {
+        // Use the raw message event
+        this.chatClient.on?.('message', async (channel, user, message, msg) => {
+          if (this.isAfkCommand(message)) return;
           await this.handleUserMessage(channel, user, message, msg);
         });
+        logger.info('AFK chat handlers initialized');
+      } else {
+        logger.warn('Chat client not properly initialized for AFK module');
       }
 
       this.initialized = true;
@@ -392,10 +401,11 @@ class AFK {
 
 // Export setup function
 export async function setupAfk(chatClient) {
+  logger.startOperation('Setting up AFK command');
   try {
     const afk = new AFK(chatClient);
     await afk.setupDatabase();
-
+    logger.endOperation('Setting up AFK command', true);
     return {
       commands: {
         afk: async (context) => await afk.handleAfkCommand(context),
@@ -413,7 +423,8 @@ export async function setupAfk(chatClient) {
       }
     };
   } catch (error) {
-    logger.error(`Error setting up AFK module: ${error}`);
+    logger.error(`Failed to setup AFK command: ${error}`);
+    logger.endOperation('Setting up AFK command', false);
     throw error;
   }
 }

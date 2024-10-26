@@ -3,92 +3,96 @@ import { Server } from 'socket.io';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import logger from './logger.js';
+import logger from './utils/logger.js';
+import cors from 'cors';
 
 export class WebPanel {
-  constructor({ chatClient, eventManager, messageLogger, startTime }) {
-    this.chatClient = chatClient;
-    this.eventManager = eventManager;
-    this.messageLogger = messageLogger;
-    this.startTime = startTime;
-    this.app = express();
-    this.server = http.createServer(this.app);
+  constructor(initialPort = 3069) {
+    this.initialPort = initialPort;
+    this.currentPort = initialPort;
+    this.server = null;
+    this.io = null;
     
-    // Updated socket.io initialization with proper CORS
-    this.io = new Server(this.server, {
-      cors: {
-        origin: ["http://localhost:3069", "http://127.0.0.1:3069"],
-        methods: ["GET", "POST"],
-        credentials: true,
-        transports: ['websocket', 'polling']
-      },
-      allowEIO3: true
+    // Add initialization logging
+    logger.debug('WebPanel constructor initialized', {
+      initialPort,
+      currentPort: this.currentPort
     });
+  }
+
+  async initialize({ chatClient, messageLogger, eventManager }) {
+    logger.startOperation('WebPanel initialization');
     
-    this.setupExpress();
-    this.setupSocketIO();
-  }
+    this.chatClient = chatClient;
+    this.messageLogger = messageLogger;
+    this.eventManager = eventManager;
 
-  setupExpress() {
-    const __dirname = path.dirname(fileURLToPath(import.meta.url));
-    this.app.use(express.static(path.join(__dirname, 'public')));
-    this.app.use(express.json());
-  }
-
-  setupSocketIO() {
-    this.io.on('connection', async (socket) => {
-      logger.info('Client connected to web panel');
-      
+    const ports = [this.initialPort, 3070, 3071, 3072];
+    
+    for (const port of ports) {
       try {
-        // Get initial channels and send them to the client
-        const channels = this.eventManager.getChannels();
-        logger.debug(`Initial channels on socket connection: ${channels}`);
-        
-        // Send initial channels to client
-        channels.forEach(channel => {
-          socket.emit('channelJoined', channel);
+        this.currentPort = port;
+        await this.startServer();
+        logger.info(`Web panel started on port ${port}`);
+        logger.endOperation('WebPanel initialization', true);
+        return true;
+      } catch (error) {
+        if (error.code === 'EADDRINUSE') {
+          logger.warn(`Port ${port} in use, trying next port...`);
+          continue;
+        }
+        logger.error('Failed to start web panel:', { error, port });
+        throw error;
+      }
+    }
+    
+    const error = new Error('All web panel ports are in use');
+    logger.error('Web panel initialization failed:', { error });
+    throw error;
+  }
+
+  async startServer() {
+    logger.startOperation('Starting web server');
+    try {
+      const port = this.currentPort;
+      if (!port) {
+        throw new Error('No valid port specified');
+      }
+
+      // Import dependencies
+      const express = await import('express');
+      const { Server } = await import('socket.io');
+      const http = await import('http');
+      const cors = await import('cors');
+      
+      this.app = express.default();
+      this.server = http.createServer(this.app);
+      
+      // Initialize Socket.IO with CORS options
+      this.io = new Server(this.server, {
+        cors: {
+          origin: "*",
+          methods: ["GET", "POST"]
+        }
+      });
+
+      // Setup middleware
+      this.app.use(cors.default());
+      this.app.use(express.static('public'));
+      this.app.use(express.json());
+
+      // Setup socket handlers
+      this.io.on('connection', async (socket) => {
+        logger.info('Client connected', { 
+          socketId: socket.id,
+          address: socket.handshake.address 
         });
 
-        // Get initial state
-        const status = await this.getBotStatus();
-        socket.emit('botStats', status);
-
-        // Set up periodic status updates
-        const updateInterval = setInterval(async () => {
-          try {
-            const status = await this.getBotStatus();
-            socket.emit('botStats', status);
-          } catch (error) {
-            logger.error('Error sending status update:', error);
-          }
-        }, 5000);
-
-        // Handle channel join/leave requests
-        socket.on('joinChannel', async (channel) => {
-          try {
-            await this.eventManager.joinChannel(channel);
-            socket.emit('channelJoined', channel);
-          } catch (error) {
-            logger.error('Error joining channel:', error);
-            socket.emit('error', 'Failed to join channel');
-          }
-        });
-
-        socket.on('leaveChannel', async (channel) => {
-          try {
-            await this.eventManager.leaveChannel(channel);
-            socket.emit('channelLeft', channel);
-          } catch (error) {
-            logger.error('Error leaving channel:', error);
-            socket.emit('error', 'Failed to leave channel');
-          }
-        });
-
-        // Handle bot messages
         socket.on('sendMessage', async (data) => {
+          const startTime = Date.now();
           try {
             const { channel, message } = data;
-            logger.debug(`Attempting to send message to ${channel}: ${message}`);
+            logger.debug('Processing chat message', { channel, socketId: socket.id });
             
             await this.chatClient.say(channel, message);
             
@@ -102,111 +106,80 @@ export class WebPanel {
               color: '#6441A5'
             };
             
-            // Log to database and emit once
             await this.messageLogger.logMessage(channel, botMessageData);
             this.io.emit('chatMessage', botMessageData);
             
-            logger.debug(`Message sent successfully to ${channel}`);
+            logger.logPerformance('Message processing', Date.now() - startTime);
           } catch (error) {
-            logger.error('Error sending message:', error);
+            logger.error('Error sending message:', { error, data });
             socket.emit('error', 'Failed to send message');
           }
         });
 
         socket.on('disconnect', () => {
-          clearInterval(updateInterval);
-          logger.info('Client disconnected');
+          logger.info('Client disconnected', { socketId: socket.id });
         });
 
-        // Update error logging
         socket.on('error', (error) => {
-          logger.error('Socket error:', error);
+          logger.error('Socket error:', { error, socketId: socket.id });
           socket.emit('error', 'An error occurred');
         });
 
-      } catch (error) {
-        logger.error('Error in socket connection:', error);
-        socket.emit('error', 'Failed to initialize connection');
-      }
-    });
-
-    // SINGLE event listener for chat messages
-    this.eventManager.on('chatMessage', (messageData) => {
-      const formattedMessage = {
-        ...messageData,
-        timestamp: new Date(messageData.timestamp || Date.now()).toISOString()
-      };
-      
-      // Only emit to socket.io clients, don't log here since MessageLogger will handle that
-      this.io.emit('chatMessage', formattedMessage);
-      
-      // Log to database only, without additional console logging
-      this.messageLogger.logMessage(messageData.channel, formattedMessage, true); // Add silent parameter
-    });
-
-    // SINGLE event listener for channel joins
-    this.eventManager.on('channelJoined', (channel) => {
-      logger.debug(`Broadcasting channelJoined event for: ${channel}`);
-      this.io.emit('channelJoined', channel);
-    });
-  }
-
-  async getBotStatus() {
-    try {
-      const globalStats = await this.messageLogger.getGlobalStats();
-      const channels = this.eventManager.getChannels();
-      const memory = process.memoryUsage();
-      const dbSize = await this.messageLogger.getDatabaseSize();
-      
-      // Calculate message rate for last minute
-      const minuteAgo = new Date(Date.now() - 60000);
-      const recentMessages = await this.messageLogger.getMessageCount(minuteAgo.toISOString());
-      const messageRate = Math.round((recentMessages || 0) / 60 * 100) / 100;
-
-      const status = {
-        isConnected: this.chatClient.isConnected, // Changed from 'connected' to 'isConnected'
-        startTime: this.startTime,
-        channels: channels,
-        messageCount: globalStats.totalMessages,
-        memoryUsage: memory.heapUsed,
-        stats: {
-          totalMessages: globalStats.totalMessages || 0,
-          uniqueUsers: globalStats.uniqueUsers || 0,
-          channelCount: channels.length,
-          messageRate: messageRate * 60,
-          dbSize: dbSize
+        // Send initial data
+        try {
+          const channels = this.eventManager.getChannels();
+          socket.emit('channels', channels);
+          
+          // Send recent messages for each channel
+          for (const channel of channels) {
+            const messages = await this.messageLogger.getRecentMessages(channel);
+            socket.emit('recentMessages', { channel, messages });
+          }
+          
+          logger.debug('Initial data sent to client', { 
+            socketId: socket.id,
+            channelCount: channels.length 
+          });
+        } catch (error) {
+          logger.error('Error sending initial data:', { error, socketId: socket.id });
         }
-      };
-
-      logger.debug('Status update:', {
-        memory: {
-          heapUsed: `${Math.round(memory.heapUsed / 1024 / 1024)}MB`,
-          rss: `${Math.round(memory.rss / 1024 / 1024)}MB`,
-        },
-        dbSize: `${Math.round(dbSize / 1024 / 1024)}MB`,
-        messageRate: `${messageRate * 60}/min`
       });
 
-      return status;
+      // Simplified port listening
+      await new Promise((resolve, reject) => {
+        this.server.listen(port, () => {
+          this.port = port;
+          this.isListening = true;
+          logger.info(`Web panel listening on port ${port}`);
+          logger.endOperation('Starting web server', true);
+          resolve();
+        }).on('error', (err) => {
+          logger.error('Server listen error:', { error: err, port });
+          reject(err);
+        });
+      });
+
+      return true;
     } catch (error) {
-      logger.error('Error getting bot status:', error);
+      logger.endOperation('Starting web server', false);
       throw error;
     }
   }
 
-  async initialize() {
-    try {
-      const port = process.env.WEB_PANEL_PORT || 3000;
-      this.server.listen(port, () => {
-        logger.info(`Web panel listening on port ${port}`);
+  async close() {
+    logger.startOperation('Closing web server');
+    if (this.isListening) {
+      await new Promise((resolve) => {
+        this.server.close(() => {
+          this.isListening = false;
+          logger.info('Web server closed successfully');
+          logger.endOperation('Closing web server', true);
+          resolve();
+        });
       });
-    } catch (error) {
-      logger.error('Error initializing web panel:', error);
-      throw error;
     }
   }
 
-  // Move formatBytes to be a class method
   formatBytes(bytes) {
     if (!bytes) return '0 B';
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];

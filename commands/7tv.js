@@ -1,18 +1,23 @@
-import logger from '../logger.js';
-import SevenTvApi from '../sevenTvApi.js';
+import logger from '../utils/logger.js';
+import SevenTvApi from '../utils/sevenTvApi.js';
 
 class SevenTVHandler {
   constructor(chatClient) {
+    logger.startOperation('Initializing SevenTVHandler');
     this.chatClient = chatClient;
-    this.apiClient = chatClient.apiClient;
+    this.apiClient = chatClient.apiClient || chatClient.api;
     this.sevenTvApi = new SevenTvApi();
+    logger.debug('SevenTV handler initialized');
   }
 
   async handleEmoteCommand(context) {
     const { user, args, channel } = context;
+    logger.startOperation(`Processing emote command from ${user.username}`);
 
     if (!args.length) {
-      await context.say(`@${user.username}, Usage: #emote <emote_name>`);
+      const response = `@${user.username}, Usage: #emote <emote_name>`;
+      await MessageLogger.logBotMessage(channel, response);
+      await context.say(response);
       return;
     }
 
@@ -30,7 +35,9 @@ class SevenTVHandler {
 
       if (!foundEmote) {
         logger.warn(`Emote not found: ${emoteName} for user: ${user.username}`);
-        await context.say(`@${user.username} ⌲ No emote found matching "${emoteName}"`);
+        const response = `@${user.username} ⌲ No emote found matching "${emoteName}"`;
+        await MessageLogger.logBotMessage(channel, response);
+        await context.say(response);
         return;
       }
 
@@ -45,11 +52,18 @@ class SevenTVHandler {
 
       const aliasText = foundEmote.aliases.length > 0 ? foundEmote.aliases.join(', ') : foundEmote.name;
       const response = `@${user.username} ${foundEmote.name} [${aliasText}] • Added by: ${actorName} • ${foundEmote.emotePageUrl}`;
+      
       logger.info(`Responding to ${user.username} with emote details: ${response}`);
+      await MessageLogger.logBotMessage(channel, response);
       await context.say(response);
+      
+      logger.endOperation(`Processing emote command from ${user.username}`, true);
     } catch (error) {
       logger.error('Error in emote command:', error);
-      await context.say(`@${user.username} ⌲ Failed to check emote. Please try again later.`);
+      const errorResponse = `@${user.username} ⌲ Failed to check emote. Please try again later.`;
+      await MessageLogger.logBotMessage(channel, errorResponse);
+      await context.say(errorResponse);
+      logger.endOperation(`Processing emote command from ${user.username}`, false);
     }
   }
 
@@ -306,15 +320,50 @@ class SevenTVHandler {
   }
 }
 
-export function setup7tv(chatClient) {
-  if (!chatClient.apiClient) {
-    logger.error('Missing API client in chat client');
-    return {};
+export async function setup7tv(context) {
+  logger.startOperation('Setting up 7TV command');
+  const { chatClient, apiClient } = context;
+  
+  if (!apiClient) {
+    logger.error('Missing API client for 7TV setup');
+    return;
   }
 
   const handler = new SevenTVHandler(chatClient);
-  return {
-    'emote': async (context) => await handler.handleEmoteCommand(context),
-    '7tv': async (context) => await handler.handle7TVCommand(context)
-  };
+  
+  // Register command
+  chatClient.addListener('message', async (channel, user, message, msg) => {
+    if (!message.startsWith('!7tv')) return;
+    
+    const args = message.slice(5).trim().split(/\s+/);
+    const subcommand = args[0]?.toLowerCase();
+    
+    try {
+      const commandContext = {
+        channel,
+        user: {
+          username: user,
+          displayName: msg.userInfo.displayName || user
+        },
+        args: args.slice(1),
+        say: (text) => chatClient.say(channel, text),
+        apiClient
+      };
+
+      switch (subcommand) {
+        case 'emote':
+          await handler.handleEmoteCommand(commandContext);
+          break;
+        case 'channels':
+          await handler.handleEmoteChannelsCommand(commandContext, args[1]);
+          break;
+        // ... other subcommands ...
+      }
+    } catch (error) {
+      logger.error('Error in 7TV command:', error);
+    }
+  });
+
+  logger.info('Loaded command: 7tv');
+  logger.endOperation('Setting up 7TV command', true);
 }

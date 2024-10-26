@@ -1,19 +1,19 @@
 import Database from 'better-sqlite3';
 import fetch from 'node-fetch';
 import { config } from '../config.js';
-import logger from '../logger.js';
+import logger from '../utils/logger.js';
 import { setTimeout as setTimeoutPromise } from 'timers/promises';
 import jsonStream from 'jsonstream/index.js';
 import { pipeline } from 'stream/promises';
 import path from 'path';
 import * as fuzzball from 'fuzzball';
 import { metaphone } from 'metaphone';
-import MessageLogger from '../MessageLogger.js';
+import { MessageLogger } from '../utils/MessageLogger.js';
 
 class Spc {
   constructor(bot) {
+    logger.startOperation('Initializing Steam Handler');
     this.bot = bot;
-    this.logger = logger;
     this.steamApiKey = config.steam.apiKey;
     this.dbPath = path.join(process.cwd(), 'databases', 'steam_game.db');
     this.isDataFetching = false;
@@ -22,9 +22,9 @@ class Spc {
     this.reviewsCache = new Map();
     this.gameDetailsCache = new Map();
     this.MAX_CACHE_SIZE = 1000;
-    this.PLAYER_COUNT_CACHE_EXPIRY = 300000; // 5 minutes in milliseconds
-    this.REVIEWS_CACHE_EXPIRY = 3600000; // 1 hour in milliseconds
-    this.GAME_DETAILS_CACHE_EXPIRY = 86400000; // 24 hours in milliseconds
+    this.PLAYER_COUNT_CACHE_EXPIRY = 300000; // 5 minutes
+    this.REVIEWS_CACHE_EXPIRY = 3600000; // 1 hour
+    this.GAME_DETAILS_CACHE_EXPIRY = 86400000; // 24 hours
     this.isInTransaction = false;
     this.isFetchingData = false;
     this.preparedStatements = {};
@@ -144,6 +144,15 @@ class Spc {
     // Add new cache for sales data
     this.salesCache = new Map();
     this.SALES_CACHE_EXPIRY = 300000; // 5 minutes
+    
+    logger.debug('Steam handler initialized with settings', {
+      maxCacheSize: this.MAX_CACHE_SIZE,
+      cacheExpiry: {
+        playerCount: this.PLAYER_COUNT_CACHE_EXPIRY,
+        reviews: this.REVIEWS_CACHE_EXPIRY,
+        gameDetails: this.GAME_DETAILS_CACHE_EXPIRY
+      }
+    });
   }
 
   async initialize() {
@@ -151,11 +160,11 @@ class Spc {
     await this._prepareStatements();
     await this.checkAndFetchGamesData();
     setInterval(() => this.clearOldCacheEntries(), 3600000); // Clear old cache entries every hour
-    this.logger.info("Spc module initialized.");
+    logger.endOperation('Initializing Steam Handler', true);
   }
 
   async _setupDatabase() {
-    this.db = new Database(this.dbPath, { verbose: this.logger.debug });
+    this.db = new Database(this.dbPath, { verbose: logger.debug });
     // No need to create a connection, better-sqlite3 manages it internally
     this.dbConnection = this.db; // Use the db instance directly
 
@@ -180,7 +189,7 @@ class Spc {
         timestamp INTEGER NOT NULL
       );
     `);
-    this.logger.info("Steam_Game, games, and last_fetch tables and index set up.");
+    logger.info("Steam_Game, games, and last_fetch tables and index set up.");
   }
 
   async _prepareStatements() {
@@ -212,12 +221,12 @@ class Spc {
     const currentTime = Date.now();
 
     if (!lastFetch || (currentTime - lastFetch.timestamp) >= this.FETCH_INTERVAL) {
-      this.logger.info('Starting Steam games data fetch');
+      logger.info('Starting Steam games data fetch');
       await this.fetchSteamGamesData();
       this.preparedStatements.updateLastFetch.run(currentTime);
-      this.logger.info('Steam games data fetch completed');
+      logger.info('Steam games data fetch completed');
     } else {
-      this.logger.info('Skipping Steam games data fetch, last fetch was recent');
+      logger.info('Skipping Steam games data fetch, last fetch was recent');
     }
 
     // Schedule the next check
@@ -226,14 +235,14 @@ class Spc {
 
   async fetchSteamGamesData() {
     if (this.isFetchingData) {
-      this.logger.info('Steam games data fetch already in progress. Skipping.');
+      logger.info('Steam games data fetch already in progress. Skipping.');
       return;
     }
 
     this.isFetchingData = true;
     try {
       if (!this.steamApiKey) {
-        this.logger.error('Steam API key is not set');
+        logger.error('Steam API key is not set');
         return;
       }
       const url = `http://api.steampowered.com/ISteamApps/GetAppList/v0002/?key=${this.steamApiKey}&format=json`;
@@ -277,10 +286,10 @@ class Spc {
       // Commit the transaction
       this.db.exec('COMMIT');
       
-      this.logger.info("Steam games data updated successfully.");
+      logger.info("Steam games data updated successfully.");
     } catch (error) {
       this.db.exec('ROLLBACK');
-      this.logger.error(`Error updating the database: ${error}`, error);
+      logger.error(`Error updating the database: ${error}`, error);
     } finally {
       this.isFetchingData = false;
     }
@@ -299,7 +308,7 @@ class Spc {
   async handleCommand({ channel, user, args, say, commandName }) {
     const username = user.username || user.name || user['display-name'] || 'Unknown User';
     const userId = user.userId || user.id || 'Unknown ID';
-    this.logger.info(`[MESSAGE] Processing #${commandName} command from ${username} (ID: ${userId})`);
+    logger.info(`[MESSAGE] Processing #${commandName} command from ${username} (ID: ${userId})`);
 
     // Handle steam command
     if (commandName === 'steam') {
@@ -368,7 +377,7 @@ class Spc {
   }
 
   async findGameIdByName(gameName) {
-    this.logger.info(`Searching for game by name: ${gameName}`);
+    logger.info(`Searching for game by name: ${gameName}`);
     const normalizedGameName = this._normalizeGameName(gameName);
     const lowerGameName = normalizedGameName.toLowerCase();
     
@@ -541,7 +550,7 @@ class Spc {
         matches.sort((a, b) => b.totalScore - a.totalScore);
 
         // Log top matches for debugging
-        this.logger.debug(
+        logger.debug(
             `Top matches for "${normalizedGameName}":`,  // Changed to template literal
             matches.slice(0, 3).map(m => ({
                 name: m.game.Name,
@@ -571,7 +580,7 @@ class Spc {
 
         return null;
     } catch (error) {
-        this.logger.error(`Error during game search: ${error}`);
+        logger.error(`Error during game search: ${error}`);
         throw error;
     }
   }
@@ -716,7 +725,7 @@ class Spc {
       this._updatePlayerCountCache(appId, playerCount);
       return playerCount;
     } catch (error) {
-      this.logger.error(`Exception during player count fetch: ${error}`, error);
+      logger.error(`Exception during player count fetch: ${error}`, error);
       return null;
     }
   }
@@ -762,7 +771,7 @@ class Spc {
       }
       return reviews;
     } catch (error) {
-      this.logger.error(`Exception during reviews fetch: ${error}`, error);
+      logger.error(`Exception during reviews fetch: ${error}`, error);
       return "Could not fetch reviews data.";
     }
   }
@@ -781,7 +790,7 @@ class Spc {
       }
       const data = await response.json();
       if (!data[appId] || !data[appId].success || !data[appId].data) {
-        this.logger.error(`No valid data found for App ID ${appId}.`);
+        logger.error(`No valid data found for App ID ${appId}.`);
         return null;
       }
       const gameData = data[appId].data;
@@ -816,7 +825,7 @@ class Spc {
       }
       return details;
     } catch (error) {
-      this.logger.error(`Exception during game details fetch: ${error}`, error);
+      logger.error(`Exception during game details fetch: ${error}`, error);
       return null;
     }
   }
@@ -843,7 +852,7 @@ class Spc {
   async cleanup() {
     if (this.db) {
       await this.db.close();
-      this.logger.info("Database connection closed.");
+      logger.info("Database connection closed.");
     }
   }
 
@@ -992,13 +1001,13 @@ class Spc {
         );
       } catch (chartsError) {
         // If Steam Charts fails, just show current players
-        this.logger.error(`Steam Charts fetch failed: ${chartsError}`);
+        logger.error(`Steam Charts fetch failed: ${chartsError}`);
         await say(
           `@${username}, ${gameDetails.name} Stats • Current Players: ${playerCount.toLocaleString()}`
         );
       }
     } catch (error) {
-      this.logger.error(`Error in SPC stats command: ${error}`);
+      logger.error(`Error in SPC stats command: ${error}`);
       await say(
         `@${username}, an error occurred while fetching player statistics.`
       );
@@ -1262,7 +1271,7 @@ class Spc {
         await say(response);
 
     } catch (error) {
-        this.logger.error('Error fetching Steam profile:', error);
+        logger.error('Error fetching Steam profile:', error);
         const errorResponse = `@${username}, Error fetching Steam profile: ${error.message}`;
         await MessageLogger.logBotMessage(channel, errorResponse);
         await say(errorResponse);
@@ -1295,7 +1304,7 @@ class Spc {
             return data.response.steamid;
         }
     } catch (error) {
-        this.logger.error('Error resolving Steam ID:', error);
+        logger.error('Error resolving Steam ID:', error);
         throw new Error('Failed to resolve Steam ID');
     }
 
@@ -1356,7 +1365,7 @@ class Spc {
         await say(recentGamesMsg);
 
     } catch (error) {
-        this.logger.error('Error in handleRecentGamesCommand:', error);
+        logger.error('Error in handleRecentGamesCommand:', error);
         const errorMsg = `@${username}, Failed to fetch recent games.`;
         await MessageLogger.logBotMessage(channel, errorMsg);
         await say(errorMsg);
@@ -1391,7 +1400,7 @@ class Spc {
         await say(avatarMsg);
 
     } catch (error) {
-        this.logger.error('Error in handleAvatarCommand:', error);
+        logger.error('Error in handleAvatarCommand:', error);
         const errorMsg = `@${username}, Failed to fetch avatar.`;
         await MessageLogger.logBotMessage(channel, errorMsg);
         await say(errorMsg);
@@ -1401,6 +1410,7 @@ class Spc {
 
 // Modify the export to handle both commands
 export function setupSteam(bot) {
+  logger.startOperation('Setting up Steam command');
   const spc = new Spc(bot);
   spc.initialize();
   
@@ -1408,6 +1418,7 @@ export function setupSteam(bot) {
     spc.cleanup();
   });
   
+  logger.endOperation('Setting up Steam command', true);
   return {
     spc: async (context) => await spc.handleCommand({ ...context, commandName: 'spc' }),
     steam: async (context) => await spc.handleCommand({ ...context, commandName: 'steam' })

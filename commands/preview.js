@@ -1,11 +1,13 @@
-import logger from '../logger.js';
+import logger from '../utils/logger.js';
 import { config } from '../config.js';
-import MessageLogger from '../MessageLogger.js';
+import { MessageLogger } from '../utils/MessageLogger.js';
 
 class PreviewHandler {
   constructor(chatClient) {
+    logger.startOperation('Initializing PreviewHandler');
     this.chatClient = chatClient;
-    this.apiClient = chatClient.apiClient;
+    this.apiClient = chatClient.apiClient || chatClient.api;
+    logger.debug('Preview handler initialized');
   }
 
   cleanChannelName(channelName) {

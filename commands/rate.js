@@ -1,8 +1,7 @@
-import MessageLogger from '../MessageLogger.js';
-import logger from '../logger.js';
+import { MessageLogger } from '../utils/MessageLogger.js';
+import logger from '../utils/logger.js';
 import { DataObject } from '@twurple/common';
 import { config } from '../config.js';
-import { isMod, isVip } from '../index.js';
 import { ChatClient } from '@twurple/chat';
 
 class RateInfo extends DataObject {
@@ -16,8 +15,10 @@ class RateInfo extends DataObject {
 
 class Rate {
   constructor(chatClient) {
+    logger.startOperation('Initializing Rate Handler');
     this.chatClient = chatClient;
     this.rateLimiter = new Map();
+    logger.debug('Rate handler initialized');
   }
 
   getMentionedUser(user, mentionedUser) {
@@ -35,11 +36,15 @@ class Rate {
 
   async handleCuteCommand(context) {
     const { channel, user, args } = context;
+    logger.startOperation(`Processing cute command from ${user.username}`);
+    
     const mentionedUser = this.getMentionedUser(user, args[0]);
     const rateInfo = this.generateRateInfo(100, 50);
     const response = `@${mentionedUser} is ${rateInfo.percentage}% cute. ${rateInfo.percentage >= 50 ? 'MenheraCute' : 'SadgeCry'}`;
+    
     await MessageLogger.logBotMessage(channel, response);
     await context.say(response);
+    logger.endOperation(`Processing cute command from ${user.username}`, true);
   }
 
   async handleGayCommand(context) {
@@ -247,7 +252,11 @@ function handleAll(context) {
 
 // Export the Rate class and setup function
 export function setupRate(chatClient) {
+  logger.startOperation('Setting up Rate command');
   const rateHandler = new Rate(chatClient);
+  
+  logger.info('Rate command setup complete');
+  logger.endOperation('Setting up Rate command', true);
   
   return {
     cute: (context) => rateHandler.handleCuteCommand(context),

@@ -1,9 +1,11 @@
-import MessageLogger from '../MessageLogger.js';
-import logger from '../logger.js';
+import { MessageLogger } from '../utils/MessageLogger.js';
+import logger from '../utils/logger.js';
 
 class MessageLookup {
   constructor(chatClient) {
+    logger.startOperation('Initializing MessageLookup');
     this.chatClient = chatClient;
+    logger.debug('MessageLookup handler initialized');
   }
 
   formatDate(date) {
@@ -28,6 +30,7 @@ class MessageLookup {
   async handleCommand(command, context) {
     const { channel, user, args } = context;
     const channelName = channel.replace('#', '');
+    logger.startOperation(`Processing ${command} command for ${user.username}`);
 
     try {
       switch (command) {
@@ -113,24 +116,22 @@ class MessageLookup {
           break;
         }
       }
+      logger.endOperation(`Processing ${command} command for ${user.username}`, true);
     } catch (error) {
       logger.error(`Error in ${command} command:`, error);
       const errorResponse = `@${user.username}, An error occurred while processing your request.`;
       await MessageLogger.logBotMessage(channel, errorResponse);
       await context.say(errorResponse);
+      logger.endOperation(`Processing ${command} command for ${user.username}`, false);
     }
   }
 }
 
 export function setupMessageLookup(chatClient) {
+  logger.startOperation('Setting up MessageLookup command');
   const handler = new MessageLookup(chatClient);
   
-  return {
-    'lm': async (context) => await handler.handleCommand('lm', context),
-    'lastmessage': async (context) => await handler.handleCommand('lastmessage', context),
-    'rm': async (context) => await handler.handleCommand('rm', context),
-    'randommessage': async (context) => await handler.handleCommand('randommessage', context),
-    'wc': async (context) => await handler.handleCommand('wc', context),
-    'count': async (context) => await handler.handleCommand('count', context)
-  };
+  logger.info('MessageLookup command setup complete');
+  logger.endOperation('Setting up MessageLookup command');
+  return handler;
 }

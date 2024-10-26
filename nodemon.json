@@ -1,10 +1,10 @@
 {
+    "env": {
+        "NODE_ENV": "development"
+    },
     "ignore": [
-      "*.json",
-      "databases/*",
-      "logs/*",
-      "node_modules/*",
-      "tokens.json"
+      "*.test.js",
+      "logs/*"
     ],
     "ext": "js",
     "watch": [
@@ -13,5 +13,8 @@
       "commands/*.js",
       "services/*.js"
     ],
-    "delay": "5000"
+    "delay": "5000",
+    "execMap": {
+        "js": "node --trace-warnings"
+    }
 }

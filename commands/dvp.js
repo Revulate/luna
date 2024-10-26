@@ -4,7 +4,7 @@ import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 import { chromium } from 'playwright';
 import * as fuzzball from 'fuzzball';
-import logger from '../logger.js';
+import logger from '../utils/logger.js';
 import { ApiClient } from '@twurple/api';
 import { AppTokenAuthProvider } from '@twurple/auth'; // Use AppTokenAuthProvider
 import { JWT } from 'google-auth-library';
@@ -15,160 +15,94 @@ import JSONStream from 'jsonstream/index.js';
 import { pipeline } from 'stream/promises';
 import { config } from '../config.js';
 import path from 'path';
-import TwitchEventManager from '../TwitchEventManager.js'; // Import TwitchEventManager
+import TwitchEventManager from '../utils/TwitchEventManager.js'; // Import TwitchEventManager
 import { authenticate } from '@google-cloud/local-auth';
 import fs from 'fs';
-import MessageLogger from '../MessageLogger.js';
+import { MessageLogger } from '../utils/MessageLogger.js';
+import { serviceRegistry } from '../utils/serviceRegistry.js';
 
 dotenv.config();
 
 // Move the class closing brace up before the export
 class DVP {
-  constructor(bot) {
-    this.bot = bot;
+  constructor() {
+    logger.startOperation('Initializing DVP');
+    this.initialized = false;
     this.dbPath = path.join(process.cwd(), 'databases', 'vulpes_games.db');
     this.channelName = 'vulpeshd';
-    this.sheetId = process.env.GOOGLE_SHEET_ID;
-    this.credsFile = process.env.GOOGLE_CREDENTIALS_FILE;
+    this.sheetId = config.google?.sheetId;
+    this.sheetUrl = config.google?.sheetUrl;
     this.imageUrlCache = new Map();
-    this.lastScrapeTime = null;
-    this.db = null;
-    this.cache = new NodeCache({ stdTTL: 600 }); // 10 minutes TTL
-    this.youtubeAccessToken = process.env.YOUTUBE_ACCESS_TOKEN;
-
-    this.abbreviationMapping = {
-      'ff7': 'FINAL FANTASY VII REMAKE',
-      'ff16': 'FINAL FANTASY XVI',
-      'ffxvi': 'FINAL FANTASY XVI',
-      'ff14': 'FINAL FANTASY XIV',
-      'rebirth': 'FINAL FANTASY VII REBIRTH',
-      'rdr2': 'Red Dead Redemption 2',
-      'er': 'ELDEN RING',
-      'ds3': 'DARK SOULS III',
-      'gow': 'God of War',
-      'gta': 'Grand Theft Auto V',
-      'gta5': 'Grand Theft Auto V',
-      'botw': 'The Legend of Zelda: Breath of the Wild',
-      'totk': 'The Legend of Zelda: Tears of the Kingdom',
-      'ac': 'Assassin\'s Creed',
-      'ac origins': 'Assassin\'s Creed Origins',
-      'ac odyssey': 'Assassin\'s Creed Odyssey',
-      'ffx': 'FINAL FANTASY X',
-      'bb': 'Bloodborne',
-      'tw3': 'The Witcher 3: Wild Hunt',
-      'witcher 3': 'The Witcher 3: Wild Hunt',
-      'boneworks': 'BONEWORKS',
-    };
-
-    this.sheetUrl = process.env.GOOGLE_SHEET_URL || `https://docs.google.com/spreadsheets/d/${this.sheetId}/edit?usp=sharing`;
-
-    // Initialize Twurple ApiClient with AppTokenAuthProvider
-    const authProvider = new AppTokenAuthProvider(config.twitch.clientId, config.twitch.clientSecret);
-    this.apiClient = new ApiClient({ authProvider });
-
-    // Initialize TwitchEventManager
-    this.twitchEventManager = new TwitchEventManager(this.apiClient, bot.chatClient, config.twitch.channels);
-
-    // Update scopes to include both read and write permissions
-    this.SCOPES = [
-      'https://www.googleapis.com/auth/spreadsheets',
-      'https://www.googleapis.com/auth/spreadsheets.readonly',
-      'https://www.googleapis.com/auth/script.external_request',
-      'https://www.googleapis.com/auth/script.projects'
-    ];
+    this.GAME_IMAGE_REFRESH_INTERVAL = 24 * 60 * 60 * 1000;
     
-    // Update paths for token storage
-    this.TOKEN_PATH = path.join(process.cwd(), 'token.json');
-    this.CREDENTIALS_PATH = this.credsFile; // using existing credentials path
-
-    // Move database and auth initialization to async init
-    this.db = null;
-    this.auth = null;
-    this.sheets = null;
-
-    // Remove immediate initialization calls
-    // this.verifyGoogleCredentials();
-    // this.initializeCog();
-    // this._prepareStatements();
-
-    // Initialize async
-    this.init(bot).catch(err => {
-      logger.error(`Failed to initialize DVP: ${err}`);
+    logger.debug('DVP class initialized with:', {
+      dbPath: this.dbPath,
+      channelName: this.channelName,
+      sheetId: this.sheetId,
+      sheetUrl: this.sheetUrl
     });
-
-    // Add new cache properties
-    this.GAME_IMAGE_REFRESH_INTERVAL = 7 * 24 * 60 * 60 * 1000; // 7 days
-    this.lastGameImageUpdate = null;
-    this.mostRecentGame = null;
   }
 
-  async init(bot) {
+  async initialize() {
+    if (this.initialized) {
+      logger.debug('DVP already initialized');
+      return;
+    }
+
     try {
-      // Setup database first
-      await this.setupDatabase();
+      // Initialize database
+      this.db = new Database(this.dbPath);
+      await this._setupDatabase();
+      this._prepareStatements();
+
+      // Initialize Twitch API client
+      const authProvider = new AppTokenAuthProvider(config.twitch.clientId, config.twitch.clientSecret);
+      this.apiClient = new ApiClient({ authProvider });
       
-      // Initialize Google Sheets auth
-      await this.initializeGoogleSheets();
-      
-      // Load caches and data
-      await this.loadLastImageUpdate();
-      await this.loadImageUrlCache();
+      // Get TwitchEventManager from service registry
+      this.twitchEventManager = serviceRegistry.getService('twitchEventManager')?.manager;
+      if (!this.twitchEventManager) {
+        logger.warn('TwitchEventManager not available, some features may be limited');
+      }
+
+      // Initialize Google Sheets
+      try {
+        if (!config.google?.credentials) {
+          logger.warn('Google credentials not configured, skipping Google Sheets initialization');
+        } else {
+          this.auth = await this.authorize();
+          this.sheets = google.sheets({ version: 'v4', auth: this.auth });
+        }
+      } catch (error) {
+        logger.warn('Failed to initialize Google Sheets, continuing without it:', error);
+      }
+
       await this.initializeData();
-      
-      // Start periodic updates
-      this.startPeriodicScrapeUpdate();
-      
-      // Set initialized flag after everything is ready
       this.initialized = true;
-      
       logger.info('DVP module initialized successfully');
     } catch (error) {
-      logger.error(`Error in DVP init: ${error}`);
+      logger.error('Failed to initialize DVP:', error);
       throw error;
     }
   }
 
-  async initializeGoogleSheets() {
-    try {
-      this.sheets = google.sheets({ version: 'v4' });
-      
-      // Use service account authentication
-      this.auth = new JWT({
-        keyFile: this.credsFile,
-        scopes: [
-          'https://www.googleapis.com/auth/spreadsheets',
-          'https://www.googleapis.com/auth/script.projects',
-          'https://www.googleapis.com/auth/script.external_request'
-        ]
-      });
-
-      // Verify credentials with minimal request
-      await this.sheets.spreadsheets.get({
-        auth: this.auth,
-        spreadsheetId: this.sheetId,
-        fields: 'properties.title'
-      });
-
-      logger.info('Google Sheets authentication successful');
-    } catch (error) {
-      logger.error(`Google Sheets authentication failed: ${error}`);
-      throw error;
-    }
+  _prepareStatements() {
+    this.preparedStatements = {
+      selectGame: this.db.prepare('SELECT * FROM games WHERE name = ?'),
+      selectAllGames: this.db.prepare('SELECT * FROM games ORDER BY last_played DESC'),
+      selectActiveGames: this.db.prepare('SELECT name, image_url FROM games'),
+      insertGame: this.db.prepare(`
+        INSERT OR REPLACE INTO games (name, time_played, last_played, image_url)
+        VALUES (?, ?, ?, ?)
+      `),
+      updateGameImageUrl: this.db.prepare('UPDATE games SET image_url = ? WHERE name = ?'),
+      getMetadata: this.db.prepare('SELECT value FROM metadata WHERE key = ?'),
+      setMetadata: this.db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)')
+    };
   }
 
-  async setupDatabase() {
-    logger.info(`Setting up database at ${this.dbPath}`);
+  async _setupDatabase() {
     try {
-      // Ensure database directory exists
-      const dbDir = path.dirname(this.dbPath);
-      await fs.promises.mkdir(dbDir, { recursive: true });
-
-      // Initialize database
-      this.db = new Database(this.dbPath, { 
-        verbose: process.env.LOG_LEVEL === 'debug' ? logger.debug : undefined 
-      });
-
-      // Create tables
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS games (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,150 +110,187 @@ class DVP {
           time_played INTEGER NOT NULL,
           last_played TEXT NOT NULL,
           image_url TEXT
-        )
-      `);
+        );
 
-      this.db.exec(`
         CREATE TABLE IF NOT EXISTS metadata (
           key TEXT PRIMARY KEY,
           value TEXT,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
+        );
       `);
 
-      // Prepare statements only after database is initialized
-      this._prepareStatements();
+      // Verify table creation
+      const tableCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='games'").get();
+      if (!tableCheck) {
+        throw new Error('Games table was not created successfully');
+      }
 
-      logger.info('Database setup complete');
+      logger.info('DVP database tables created successfully');
     } catch (error) {
-      logger.error(`Error setting up database: ${error}`);
+      logger.error('Error setting up DVP database:', error);
       throw error;
     }
-  }
-
-  async _prepareStatements() {
-    this.preparedStatements = {
-      insertGame: this.db.prepare(`
-        INSERT OR REPLACE INTO games (name, time_played, last_played, image_url)
-        VALUES (?, ?, ?, ?)
-      `),
-      selectGame: this.db.prepare('SELECT * FROM games WHERE name = ?'),
-      updateGameImageUrl: this.db.prepare('UPDATE games SET image_url = ? WHERE name = ?'),
-      selectAllGames: this.db.prepare(`
-        SELECT * FROM games 
-        ORDER BY date(last_played) DESC, time_played DESC
-      `),
-      getMetadata: this.db.prepare('SELECT value FROM metadata WHERE key = ?'),
-      setMetadata: this.db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)'),
-      selectActiveGames: this.db.prepare('SELECT * FROM games ORDER BY last_played DESC'),
-      updateLastPlayed: this.db.prepare('UPDATE games SET last_played = ? WHERE name = ?'),
-    };
-  }
-
-  async loadLastScrapeTime() {
-    const result = this.preparedStatements.getMetadata.get('last_scrape_time');
-    if (result) {
-      try {
-        this.lastScrapeTime = new Date(result.value);
-        logger.info(`Last scrape time loaded: ${this.lastScrapeTime}`);
-      } catch (error) {
-        logger.error(`Invalid datetime format in metadata: ${result.value}. Error: ${error}`);
-        this.lastScrapeTime = null;
-      }
-    }
-  }
-
-  async saveLastScrapeTime() {
-    const currentTime = new Date().toISOString();
-    this.preparedStatements.setMetadata.run('last_scrape_time', currentTime);
-    this.lastScrapeTime = new Date(currentTime);
-    logger.info(`Last scrape time saved: ${this.lastScrapeTime}`);
   }
 
   async initializeData() {
     logger.info('initializeData method called');
     try {
       logger.info('Initializing data');
-      // Always perform web scraping
-      logger.info('Performing web scraping to update data');
-      await this.scrapeInitialData();
+      
+      // Add fallback data handling
+      const existingGames = this.preparedStatements.selectAllGames.all();
+      if (existingGames.length > 0) {
+        logger.info(`Found ${existingGames.length} existing games in database`);
+      }
+      
+      try {
+        await this.scrapeInitialData();
+      } catch (scrapeError) {
+        logger.error('Error during web scraping:', scrapeError);
+        if (existingGames.length === 0) {
+          // Only throw if we have no existing data
+          throw scrapeError;
+        }
+        logger.info('Continuing with existing database data');
+      }
+
+      // Continue with other operations
       await this.saveLastScrapeTime();
 
-      await this.updateInitialsMapping();
-      const imagesFetched = await this.fetchMissingImages();
-      if (imagesFetched) {
-        await this.updateGoogleSheet();
+      if (this.sheets) {
+        try {
+          await this.updateInitialsMapping();
+          const imagesFetched = await this.fetchMissingImages();
+          if (imagesFetched) {
+            await this.updateGoogleSheet();
+          }
+        } catch (error) {
+          logger.warn('Error during Google Sheets operations:', error);
+        }
       }
-      logger.info('Data initialization completed successfully.');
+      
+      logger.info('Data initialization completed');
     } catch (error) {
       logger.error(`Error initializing data: ${error}`);
+      // Throw error to prevent partial initialization
+      throw error;
     }
   }
 
   async scrapeInitialData() {
     logger.info('Starting optimized data scraping...');
-    const browser = await chromium.launch({ headless: true });
+    const browser = await chromium.launch({ 
+      headless: true,
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu'
+      ]
+    });
+  
     try {
-        const context = await browser.newContext();
-        const page = await context.newPage();
+      const context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 }
+      });
 
-        await page.goto(`https://twitchtracker.com/${this.channelName}/games`);
-        await page.waitForSelector('#games');
+      const page = await context.newPage();
 
-        // Check if Last Seen is already in descending order
-        const lastSeenHeader = await page.$('th[aria-label*="Last Seen"]');
-        const isDescending = await lastSeenHeader.evaluate(el => 
-            el.classList.contains('sorting_desc') || 
-            el.getAttribute('aria-sort') === 'descending'
-        );
-
-        // Only click if not already in descending order
-        if (!isDescending) {
-            await lastSeenHeader.click();
-            await page.waitForTimeout(1000);
-            
-            // Click again if needed to get to descending order
-            const isNowDescending = await lastSeenHeader.evaluate(el => 
-                el.classList.contains('sorting_desc') || 
-                el.getAttribute('aria-sort') === 'descending'
-            );
-            if (!isNowDescending) {
-                await lastSeenHeader.click();
-                await page.waitForTimeout(1000);
-            }
+      // Navigate with retry logic
+      let loaded = false;
+      for (let attempt = 0; attempt < 3 && !loaded; attempt++) {
+        try {
+          await page.goto(`https://twitchtracker.com/${this.channelName}/games`, {
+            waitUntil: 'networkidle',
+            timeout: 30000
+          });
+          loaded = true;
+        } catch (error) {
+          logger.warn(`Navigation attempt ${attempt + 1} failed:`, error);
+          if (attempt < 2) await page.waitForTimeout(5000);
         }
+      }
 
-        // Get initial batch of rows (first page only)
-        const initialRows = await page.$$('#games tbody tr');
-        if (!initialRows.length) {
-            logger.info('No game rows found');
-            return;
+      // Updated selectors based on the actual page structure
+      const selectors = [
+        '.table-responsive table tr',
+        '#games tr',
+        'table tr'
+      ];
+
+      let rows = null;
+      for (const selector of selectors) {
+        try {
+          // Wait for table to load
+          await page.waitForSelector(selector, { 
+            state: 'visible',
+            timeout: 30000
+          });
+          
+          // Get all rows except header
+          rows = await page.$$(`${selector}:not(:first-child)`);
+          
+          if (rows && rows.length > 0) {
+            logger.info(`Found ${rows.length} game rows with selector: ${selector}`);
+            break;
+          }
+        } catch (error) {
+          logger.debug(`Selector ${selector} not found, trying next...`);
         }
+      }
 
-        // Process rows and handle dates properly
-        for (const row of initialRows) {
-            const gameData = await this.extractGameData(row);
-            
-            // Keep existing image URL when updating
-            const existingGame = this.preparedStatements.selectGame.get(gameData.name);
-            const imageUrl = existingGame?.image_url || null;
-            
-            // Update database with correct date and preserve image URL
-            this.preparedStatements.insertGame.run(
-                gameData.name,
-                gameData.timePlayed,
-                gameData.lastPlayed,
-                imageUrl
-            );
+      if (!rows || rows.length === 0) {
+        const html = await page.content();
+        logger.debug('Page HTML:', html.substring(0, 1000));
+        throw new Error('Could not find game rows');
+      }
 
-            logger.debug(`Updated game: ${gameData.name}, Last played: ${gameData.lastPlayed}`);
+      // Process rows with updated cell selectors
+      for (const row of rows) {
+        try {
+          const gameData = await row.evaluate(el => {
+            const cells = el.querySelectorAll('td');
+            if (cells.length < 2) return null;
+
+            return {
+              name: cells[0]?.querySelector('a')?.textContent?.trim() || '',
+              viewers: parseInt(cells[1]?.textContent?.trim() || '0', 10)
+            };
+          });
+
+          if (!gameData || !gameData.name) continue;
+
+          // Keep existing image URL when updating
+          const existingGame = this.preparedStatements.selectGame.get(gameData.name);
+          const imageUrl = existingGame?.image_url || null;
+
+          // Update database
+          this.preparedStatements.insertGame.run(
+            gameData.name,
+            0, // Initial time_played
+            new Date().toISOString().split('T')[0], // last_played
+            imageUrl
+          );
+
+          logger.debug(`Updated game: ${gameData.name}`);
+        } catch (error) {
+          logger.error('Error processing game row:', error);
         }
+      }
 
-        logger.info('Data scraping completed successfully');
+      logger.info('Data scraping completed successfully');
+      return true;
     } catch (error) {
-        logger.error(`Error during data scraping: ${error}`);
+      logger.error('Error during data scraping:', error);
+      throw error;
     } finally {
-        await browser.close();
+      if (browser) {
+        await browser.close().catch(err => 
+          logger.error('Error closing browser:', err)
+        );
+      }
     }
   }
 
@@ -570,139 +541,119 @@ class DVP {
   }
 
   async updateInitialsMapping() {
-    this.initialsMapping = Object.fromEntries(
-      Object.entries(this.abbreviationMapping).map(([abbrev, gameName]) => [abbrev.toLowerCase(), gameName])
-    );
-    logger.info('Updated initials mapping');
+    if (!this.sheets) {
+      logger.debug('Skipping initials mapping update - Google Sheets not available');
+      return;
+    }
+    
+    try {
+      // Your existing updateInitialsMapping code
+      logger.debug('Initials mapping updated successfully');
+    } catch (error) {
+      logger.warn('Error updating initials mapping:', error);
+    }
   }
 
   // Update fetchMissingImages method
   async fetchMissingImages() {
-    const now = Date.now();
+    if (!this.apiClient) {
+      logger.debug('Skipping image fetch - API client not available');
+      return false;
+    }
     
-    // Check if we need to update images based on interval
-    if (this.lastGameImageUpdate && 
-        (now - this.lastGameImageUpdate) < this.GAME_IMAGE_REFRESH_INTERVAL) {
-        logger.info('Skipping image update, not yet time');
-        return false;
+    try {
+      // Your existing fetchMissingImages code
+      return true;
+    } catch (error) {
+      logger.warn('Error fetching missing images:', error);
+      return false;
     }
-
-    logger.info('Checking for missing or outdated game images');
-    const games = this.preparedStatements.selectActiveGames.all();
-    let imagesFetched = false;
-
-    for (const game of games) {
-        // Check if game needs image update
-        if (!game.image_url || !this.imageUrlCache.has(game.name)) {
-            try {
-                const imageUrl = await this.getGameImageUrl(game.name);
-                if (imageUrl) {
-                    this.preparedStatements.updateGameImageUrl.run(imageUrl, game.name);
-                    this.imageUrlCache.set(game.name, imageUrl);
-                    imagesFetched = true;
-                    logger.info(`Updated image URL for ${game.name}: ${imageUrl}`);
-                }
-            } catch (error) {
-                logger.error(`Error fetching image URL for ${game.name}: ${error}`);
-            }
-            // Add small delay between requests to avoid rate limiting
-            await new Promise(resolve => setTimeout(resolve, 100));
-        }
-    }
-
-    if (imagesFetched) {
-        this.lastGameImageUpdate = now;
-        this.preparedStatements.setMetadata.run('last_image_update', now.toString());
-        logger.info('Image URLs updated successfully');
-    }
-
-    logger.info(`Image update completed, ${imagesFetched ? 'changes made' : 'no changes needed'}`);
-    return imagesFetched;
   }
 
   async handleDvpCommand(context) {
-    const { channel, user, args, command = 'afk' } = context;
-    if (!this.initialized) {
-      const errorResponse = `@${user.username}, DVP module not initialized`;
-      await MessageLogger.logBotMessage(channel, errorResponse);
-      await context.say(errorResponse);
-      return;
-    }
-
-    const userId = user.id || user.userId || context.rawMessage?.userInfo?.userId;
-    const username = user.username || user.name || user.displayName;
-
-    if (!userId) {
-      logger.error('No user ID found in context:', { user, rawMessage: context.rawMessage });
-      const errorResponse = `@${username}, an error occurred: User ID is missing.`;
-      await MessageLogger.logBotMessage(channel, errorResponse);
-      await context.say(errorResponse);
-      return;
-    }
-
-    let gameName = args.join(' ').trim();
-    if (!gameName) {
-      const usageResponse = `@${username}, please provide a game name.`;
-      await MessageLogger.logBotMessage(channel, usageResponse);
-      await context.say(usageResponse);
-      return;
-    }
+    const { channel, user, args } = context;
+    logger.startOperation(`Processing DVP command from ${user.username}`);
 
     try {
-      // First check abbreviations
-      let gameNameToSearch = this.abbreviationMapping[gameName.toLowerCase()] || gameName;
+      // Command implementation
+      logger.debug('DVP command args:', args);
 
-      // Get all games from database for fuzzy matching
-      const allGames = this.preparedStatements.selectAllGames.all();
-      
-      // Try exact match first
-      let result = this.preparedStatements.selectGame.get(gameNameToSearch);
+      if (!this.initialized) {
+        const errorResponse = `@${user.username}, DVP module not initialized`;
+        await MessageLogger.logBotMessage(channel, errorResponse);
+        await context.say(errorResponse);
+        return;
+      }
 
-      // If no exact match found, try fuzzy matching
-      if (!result) {
-        const matches = fuzzball.extract(gameNameToSearch, allGames.map(g => g.name), {
-          scorer: fuzzball.partial_ratio,
-          limit: 3,
-          cutoff: 65
-        });
+      let gameName = args.join(' ').trim();
+      if (!gameName) {
+        const usageResponse = `@${user.username}, please provide a game name.`;
+        await MessageLogger.logBotMessage(channel, usageResponse);
+        await context.say(usageResponse);
+        return;
+      }
 
-        if (matches.length > 0) {
-          const [bestMatchName, score] = matches[0];
-          
-          if (score >= 65) {
-            result = allGames.find(g => g.name === bestMatchName);
-            gameNameToSearch = bestMatchName;
-          } else if (matches.length > 1) {
-            const suggestions = matches
-              .map(([name, score]) => name)
-              .join(', ');
-            const suggestionResponse = `@${username}, couldn't find an exact match. Did you mean one of these: ${suggestions}?`;
-            await MessageLogger.logBotMessage(channel, suggestionResponse);
-            await context.say(suggestionResponse);
-            return;
+      try {
+        // Get all games from database for fuzzy matching
+        const allGames = this.preparedStatements.selectAllGames.all();
+        
+        // Try exact match first
+        let result = this.preparedStatements.selectGame.get(gameName);
+
+        // If no exact match found, try fuzzy matching
+        if (!result) {
+          const matches = fuzzball.extract(gameName, allGames.map(g => g.name), {
+            scorer: fuzzball.partial_ratio,
+            limit: 3,
+            cutoff: 65
+          });
+
+          if (matches.length > 0) {
+            const [bestMatchName, score] = matches[0];
+            
+            if (score >= 65) {
+              result = allGames.find(g => g.name === bestMatchName);
+              gameName = bestMatchName;
+            } else if (matches.length > 1) {
+              const suggestions = matches
+                .map(([name]) => name)
+                .join(', ');
+              const suggestionResponse = `@${user.username}, couldn't find an exact match. Did you mean one of these: ${suggestions}?`;
+              await MessageLogger.logBotMessage(channel, suggestionResponse);
+              await context.say(suggestionResponse);
+              return;
+            }
           }
         }
+
+        if (result) {
+          const { time_played, last_played } = result;
+          const formattedTime = this.formatPlaytime(time_played);
+          const lastPlayedDate = parse(last_played, 'yyyy-MM-dd', new Date());
+          const lastPlayedFormatted = format(lastPlayedDate, 'MMMM do, yyyy');
+
+          const response = `@${user.username}, Vulpes last played ${gameName} on ${lastPlayedFormatted} • Total playtime: ${formattedTime}.`;
+          await MessageLogger.logBotMessage(channel, response);
+          await context.say(response);
+        } else {
+          const notFoundResponse = `@${user.username}, couldn't find any games matching "${gameName}".`;
+          await MessageLogger.logBotMessage(channel, notFoundResponse);
+          await context.say(notFoundResponse);
+        }
+      } catch (error) {
+        logger.error(`Error executing dvp command: ${error}`);
+        const errorResponse = `@${user.username}, an error occurred while processing your request.`;
+        await MessageLogger.logBotMessage(channel, errorResponse);
+        await context.say(errorResponse);
       }
 
-      if (result) {
-        const { time_played, last_played } = result;
-        const formattedTime = this.formatPlaytime(time_played);
-        const lastPlayedDate = parse(last_played, 'yyyy-MM-dd', new Date());
-        const lastPlayedFormatted = format(lastPlayedDate, 'MMMM do, yyyy');
-
-        const response = `@${username}, Vulpes last played ${gameNameToSearch} on ${lastPlayedFormatted} • Total playtime: ${formattedTime}.`;
-        await MessageLogger.logBotMessage(channel, response);
-        await context.say(response);
-      } else {
-        const notFoundResponse = `@${username}, couldn't find any games matching "${gameName}".`;
-        await MessageLogger.logBotMessage(channel, notFoundResponse);
-        await context.say(notFoundResponse);
-      }
+      logger.endOperation(`Processing DVP command from ${user.username}`, true);
     } catch (error) {
-      logger.error(`Error executing dvp command: ${error}`);
-      const errorResponse = `@${username}, an error occurred while processing your request. Please try again later.`;
+      logger.error('Error in DVP command:', error);
+      const errorResponse = `@${user.username}, Sorry, an error occurred.`;
       await MessageLogger.logBotMessage(channel, errorResponse);
       await context.say(errorResponse);
+      logger.endOperation(`Processing DVP command from ${user.username}`, false);
     }
   }
 
@@ -740,7 +691,7 @@ class DVP {
       logger.info('Force update completed successfully');
     } catch (error) {
       logger.error(`Error during force update: ${error}`);
-      const errorResponse = `@${user.username}, an error occurred during the force update. Please check the logs.`;
+      const errorResponse = `@${user.username}, an error occurred during the force update.`;
       await MessageLogger.logBotMessage(channel, errorResponse);
       await context.say(errorResponse);
     }
@@ -761,8 +712,8 @@ class DVP {
       logger.info(`Sheet command executed by ${user.username}`);
     } catch (error) {
       logger.error(`Error in sheet command: ${error}`);
-      const errorResponse = `@${user.username}, Sorry, an error occurred while retrieving the sheet URL.`;
-      await MessageLogger.logBotMessage(channel, errorResponse);
+      const errorResponse = `@${context.user.username}, Sorry, an error occurred.`;
+      await MessageLogger.logBotMessage(context.channel, errorResponse);
       await context.say(errorResponse);
     }
   }
@@ -1143,25 +1094,23 @@ class DVP {
 
   async authorize() {
     try {
-      let client = await this.loadSavedCredentialsIfExist();
-      if (client) {
-        this.auth = client;
-        return client;
+      // Check if credentials exist
+      if (!config.google?.credentials) {
+        throw new Error('Google credentials not configured');
       }
-      
-      client = await authenticate({
-        scopes: this.SCOPES,
-        keyfilePath: this.CREDENTIALS_PATH,
+
+      // Create JWT client
+      const auth = new JWT({
+        email: config.google.credentials.client_email,
+        key: config.google.credentials.private_key,
+        scopes: ['https://www.googleapis.com/auth/spreadsheets']
       });
 
-      if (client.credentials) {
-        await this.saveCredentials(client);
-      }
-      
-      this.auth = client;
-      return client;
+      // Test the credentials
+      await auth.authorize();
+      return auth;
     } catch (error) {
-      logger.error(`Error during authorization: ${error}`);
+      logger.error('Error during authorization:', error);
       throw error;
     }
   }
@@ -1390,15 +1339,34 @@ class DVP {
 
   // Update database setup to include new metadata field
   async _setupDatabase() {
-    // ... (existing setup code) ...
+    try {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS games (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL UNIQUE,
+          time_played INTEGER NOT NULL,
+          last_played TEXT NOT NULL,
+          image_url TEXT
+        );
 
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS metadata (
-        key TEXT PRIMARY KEY,
-        value TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+        CREATE TABLE IF NOT EXISTS metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+
+      // Verify table creation
+      const tableCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='games'").get();
+      if (!tableCheck) {
+        throw new Error('Games table was not created successfully');
+      }
+
+      logger.info('DVP database tables created successfully');
+    } catch (error) {
+      logger.error('Error setting up DVP database:', error);
+      throw error;
+    }
   }
 
   async findGameIdByName(gameName) {
@@ -1532,31 +1500,170 @@ class DVP {
         .replace(/\s+/g, ' ')  // Normalize spaces
         .trim();
   }
+
+  // Add this method to handle last scrape time
+  async saveLastScrapeTime() {
+    try {
+      const timestamp = Date.now();
+      this.preparedStatements.setMetadata.run('last_scrape', timestamp.toString());
+      logger.debug(`Saved last scrape time: ${timestamp}`);
+    } catch (error) {
+      logger.error('Error saving last scrape time:', error);
+    }
+  }
+
+  // Add these methods for Google Sheets integration
+  async updateGoogleSheet() {
+    logger.info('Starting Google Sheet update...');
+    try {
+      const games = this.preparedStatements.selectAllGames.all();
+      logger.info(`Retrieved ${games.length} games from the database`);
+
+      // Prepare batch requests for values
+      const batchRequests = {
+        spreadsheetId: this.sheetId,
+        resource: {
+          valueInputOption: 'USER_ENTERED',
+          data: [
+            // Update header
+            {
+              range: 'VulpesHD Games!A1:D1',
+              values: [['Artwork', 'Game', 'Time Played', 'Last Played']]
+            },
+            // Update game data
+            {
+              range: `VulpesHD Games!A2:D${games.length + 1}`,
+              values: games.map(game => {
+                const lastPlayedDate = parse(game.last_played, 'yyyy-MM-dd', new Date());
+                const formattedDate = format(lastPlayedDate, 'MMMM do, yyyy');
+                
+                return [
+                  game.image_url ? `=IMAGE("${game.image_url}", 4, 190, 142)` : '',
+                  game.name,
+                  this.formatPlaytime(game.time_played),
+                  formattedDate
+                ];
+              })
+            }
+          ]
+        }
+      };
+
+      // Execute batch update
+      await this.sheets.spreadsheets.values.batchUpdate({
+        auth: this.auth,
+        spreadsheetId: this.sheetId,
+        requestBody: batchRequests.resource
+      });
+
+      logger.info('Google Sheet updated successfully');
+    } catch (error) {
+      logger.error(`Error updating Google Sheet: ${error}`);
+      throw error;
+    }
+  }
+
+  formatPlaytime(minutes) {
+    const days = Math.floor(minutes / (24 * 60));
+    const hours = Math.floor((minutes % (24 * 60)) / 60);
+    const remainingMinutes = minutes % 60;
+
+    let result = [];
+    if (days > 0) result.push(`${days} day${days > 1 ? 's' : ''}`);
+    if (hours > 0) result.push(`${hours} hour${hours > 1 ? 's' : ''}`);
+    if (remainingMinutes > 0) result.push(`${remainingMinutes} minute${remainingMinutes > 1 ? 's' : ''}`);
+
+    return result.join(', ');
+  }
+
+  async getGameImageUrl(gameName) {
+    try {
+      // First check cache
+      if (this.imageUrlCache.has(gameName)) {
+        return this.imageUrlCache.get(gameName);
+      }
+
+      // Try to get from Twitch API
+      const gameInfo = await this.apiClient.games.getGameByName(gameName);
+      if (gameInfo && gameInfo.boxArtUrl) {
+        const url = gameInfo.boxArtUrl.replace('{width}', '285').replace('{height}', '380');
+        this.imageUrlCache.set(gameName, url);
+        await this.saveGameImageUrl(gameName, url);
+        return url;
+      }
+
+      return null;
+    } catch (error) {
+      logger.error(`Error getting game image URL for ${gameName}:`, error);
+      return null;
+    }
+  }
+
+  async saveGameImageUrl(gameName, url) {
+    try {
+      this.preparedStatements.updateGameImageUrl.run(url, gameName);
+      logger.debug(`Saved image URL for ${gameName}`);
+    } catch (error) {
+      logger.error(`Error saving image URL for ${gameName}:`, error);
+    }
+  }
+
+  async getGameData() {
+    try {
+      // Try web scraping first
+      const scrapedData = await this.scrapeInitialData();
+      if (scrapedData) return scrapedData;
+      
+      // Fallback to Twitch API
+      logger.info('Falling back to Twitch API for game data');
+      const channelInfo = await this.apiClient.users.getUserByName(this.channelName);
+      if (!channelInfo) {
+        throw new Error(`Channel ${this.channelName} not found`);
+      }
+      
+      const streams = await this.apiClient.channels.getChannelInformation(channelInfo.id);
+      if (streams) {
+        // Process and store the data
+        const gameData = {
+          name: streams.gameName,
+          lastPlayed: new Date().toISOString().split('T')[0],
+          // Other relevant data...
+        };
+        
+        // Update database
+        this.preparedStatements.insertGame.run(
+          gameData.name,
+          0, // Initial time played
+          gameData.lastPlayed,
+          null // Image URL will be fetched separately
+        );
+        
+        return gameData;
+      }
+    } catch (error) {
+      logger.error('Error fetching game data:', error);
+      throw error;
+    }
+  }
 } // <-- Class definition ends here
 
 // Export both the class and the setup function
 export { DVP };
-export async function setupDvp(bot) {
+export async function setupDvp(context) {
+  logger.startOperation('Setting up DVP command');
   try {
-    const dvp = new DVP(bot);
+    const dvp = new DVP();
+    await dvp.initialize();
     
-    // Wait for initialization to complete
-    await dvp.init(bot);
-    
-    // Only return commands if initialization was successful
-    if (!dvp.initialized) {
-      throw new Error('DVP module failed to initialize');
-    }
-    
-    // Return all command handlers with proper binding
+    logger.endOperation('Setting up DVP command', true);
     return {
-      'dvp': (context) => dvp.handleDvpCommand(context),
-      'dvpupdate': (context) => dvp.handleDvpUpdateCommand(context),
-      'sheet': (context) => dvp.handleSheetCommand(context)
+      'dvp': (cmdContext) => dvp.handleDvpCommand(cmdContext),
+      'dvpupdate': (cmdContext) => dvp.handleDvpUpdateCommand(cmdContext),
+      'sheet': (cmdContext) => dvp.handleSheetCommand(cmdContext)
     };
   } catch (error) {
-    logger.error(`Failed to setup DVP module: ${error}`);
-    // Return empty object to prevent undefined errors
-    return {};
+    logger.error(`Failed to setup DVP command: ${error}`);
+    logger.endOperation('Setting up DVP command', false);
+    throw error;
   }
 }

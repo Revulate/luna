@@ -1,14 +1,16 @@
 import os from 'os';
 import fs from 'fs/promises';
 import path from 'path';
-import logger from '../logger.js';
-import MessageLogger from '../MessageLogger.js';
-import TwitchEventManager from '../TwitchEventManager.js';
+import logger from '../utils/logger.js';
+import { MessageLogger } from '../utils/MessageLogger.js';
+import TwitchEventManager from '../utils/TwitchEventManager.js';
 
 class Stats {
   constructor(bot) {
+    logger.startOperation('Initializing Stats Handler');
     this.bot = bot;
     this.startTime = new Date();
+    logger.debug('Stats handler initialized');
   }
 
   async getDirectorySize(directory) {
@@ -54,6 +56,8 @@ class Stats {
 
   async handleStatsCommand(context) {
     const { channel, user } = context;
+    logger.startOperation(`Processing stats command for ${user.username}`);
+    
     try {
       const uptime = this.formatUptime(Date.now() - this.startTime.getTime());
       const ping = await this.getPing();
@@ -64,11 +68,13 @@ class Stats {
       const response = `@${user.username} • Uptime: ${uptime} • Ping: ${pingDisplay} • Memory: ${this.formatBytes(memoryUsage)} • Database: ${this.formatBytes(storageUsage)}`;
       await MessageLogger.logBotMessage(channel, response);
       await context.say(response);
+      logger.endOperation(`Processing stats command for ${user.username}`, true);
     } catch (error) {
       logger.error(`Error in handleStatsCommand: ${error}`);
       const errorResponse = `@${user.username}, an error occurred while fetching stats.`;
       await MessageLogger.logBotMessage(channel, errorResponse);
       await context.say(errorResponse);
+      logger.endOperation(`Processing stats command for ${user.username}`, false);
     }
   }
 
@@ -122,7 +128,9 @@ class Stats {
 }
 
 export async function setupStats(bot) {
+  logger.startOperation('Setting up Stats command');
   const stats = new Stats(bot);
+  logger.endOperation('Setting up Stats command', true);
   return {
     stats: async (context) => await stats.handleStatsCommand(context),
     ping: async (context) => await stats.handlePingCommand(context),

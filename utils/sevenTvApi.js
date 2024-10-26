@@ -3,25 +3,36 @@ import logger from './logger.js';
 
 class SevenTvApi {
   constructor() {
+    logger.startOperation('Initializing SevenTvApi');
     this.baseUrl = 'https://7tv.io/v3';
     this.gqlUrl = 'https://7tv.io/v3/gql';
+    this.retryLimit = 3;
+    this.retryDelay = 1000;
+    logger.debug('SevenTV API initialized');
   }
 
   async fetchJson(url, options = {}) {
     try {
+      logger.debug(`Fetching JSON from ${url}`);
       const response = await fetch(url, options);
       if (!response.ok) {
         const errorText = await response.text();
+        logger.error('Failed to fetch:', { 
+          status: response.status, 
+          statusText: response.statusText, 
+          error: errorText 
+        });
         throw new Error(`Failed to fetch: ${response.status} ${response.statusText} - ${errorText}`);
       }
       return await response.json();
     } catch (error) {
-      logger.error('Error fetching JSON:', error);
+      logger.error('Error fetching JSON:', { error, url });
       throw error;
     }
   }
 
   async fetchGraphQL(query, variables = {}) {
+    logger.debug('Executing GraphQL query', { variables });
     try {
       const response = await fetch(this.gqlUrl, {
         method: 'POST',
@@ -33,6 +44,11 @@ class SevenTvApi {
 
       if (!response.ok) {
         const errorText = await response.text();
+        logger.error('GraphQL request failed:', {
+          status: response.status,
+          statusText: response.statusText,
+          error: errorText
+        });
         throw new Error(`Failed to fetch: ${response.status} ${response.statusText} - ${errorText}`);
       }
 
@@ -45,6 +61,7 @@ class SevenTvApi {
   }
 
   async getUserByTwitchID(twitchID) {
+    logger.debug(`Getting user by Twitch ID: ${twitchID}`);
     const url = `${this.baseUrl}/users/twitch/${twitchID}`;
     return this.fetchJson(url);
   }
@@ -206,6 +223,34 @@ class SevenTvApi {
       username: data.user.username,
       displayName: data.user.display_name
     };
+  }
+
+  async fetchWithRetry(url, options = {}, retries = 0) {
+    try {
+      const response = await fetch(url, {
+        ...options,
+        timeout: 5000, // Add timeout
+        headers: {
+          ...options.headers,
+          'User-Agent': 'TwitchBot/1.0' // Add user agent
+        }
+      });
+
+      if (response.status === 429 && retries < this.retryLimit) {
+        const delay = parseInt(response.headers.get('Retry-After')) * 1000 || this.retryDelay;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this.fetchWithRetry(url, options, retries + 1);
+      }
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response;
+    } catch (error) {
+      if (retries < this.retryLimit) {
+        await new Promise(resolve => setTimeout(resolve, this.retryDelay));
+        return this.fetchWithRetry(url, options, retries + 1);
+      }
+      throw error;
+    }
   }
 }
 

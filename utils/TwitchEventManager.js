@@ -1,44 +1,137 @@
 import { ApiClient } from '@twurple/api';
 import { EventEmitter } from 'events';
 import logger from './logger.js';
-import { config } from './config.js';
+import { config } from '../config.js';
+import { EventSubWsListener } from '@twurple/eventsub-ws';
 
 export default class TwitchEventManager extends EventEmitter {
   constructor(apiClient, chatClient, initialChannels = []) {
     super();
+    logger.startOperation('Initializing TwitchEventManager');
     this.apiClient = apiClient;
     this.chatClient = chatClient;
+    this.botUsername = config.twitch.botUsername.toLowerCase();
+    this.streamMonitors = new Map();
+    this.lastStreamAnalysis = new Map();
     
-    // Debug initial channels input
-    logger.debug(`Constructor received initialChannels: ${JSON.stringify(initialChannels)}`);
+    logger.debug('Constructor parameters:', { 
+      initialChannels,
+      botUsername: this.botUsername 
+    });
     
     // Ensure channels are properly formatted and non-empty
     this.channels = new Set(
       initialChannels
-        .filter(channel => {
-          const isValid = channel && channel.trim();
-          if (!isValid) logger.debug(`Filtered out invalid channel: ${channel}`);
-          return isValid;
-        })
-        .map(channel => {
-          const formatted = channel.toLowerCase().replace(/^#/, '');
-          logger.debug(`Formatted channel ${channel} to ${formatted}`);
-          return formatted;
-        })
+        .filter(channel => channel && channel.trim())
+        .map(channel => channel.toLowerCase().replace(/^#/, ''))
     );
     
     this.messageLogger = null;
-    logger.info(`TwitchEventManager initialized with channels: ${Array.from(this.channels).join(', ')}`);
+    this.eventSubListener = null;
     
-    // Add stream monitoring
-    this.streamMonitors = new Map();
-    this.lastStreamAnalysis = new Map();
-    this.streamAnalysisInterval = 10 * 60 * 1000; // 10 minutes
-    
-    // Start stream monitoring
-    this.startStreamMonitoring();
-    
-    this.claudeHandler = null; // Add this line
+    // Initialize EventSub listener
+    this.eventSubListener = new EventSubWsListener({
+      apiClient: this.apiClient,
+      strictHostCheck: false
+    });
+
+    // Add API client to chat client for other modules
+    if (this.chatClient && this.apiClient) {
+      this.chatClient.apiClient = this.apiClient;
+    }
+
+    logger.info('TwitchEventManager initialized with channels:', 
+      Array.from(this.channels).join(', ')
+    );
+    logger.endOperation('Initializing TwitchEventManager', true);
+  }
+
+  async initialize() {
+    try {
+      logger.info('Starting TwitchEventManager initialization...');
+
+      // Validate required clients
+      if (!this.apiClient || !this.chatClient) {
+        throw new Error('Missing required clients in TwitchEventManager');
+      }
+
+      // Setup event handlers first
+      this.setupEventHandlers();
+      
+      // Setup EventSub subscriptions
+      await this.setupEventSub();
+      
+      // Start stream monitoring
+      await this.startStreamMonitoring();
+      
+      logger.info('TwitchEventManager initialization complete');
+    } catch (error) {
+      logger.error('Error initializing TwitchEventManager:', error);
+      throw error;
+    }
+  }
+
+  async setupEventSub() {
+    try {
+      if (!this.botUsername) {
+        throw new Error('Bot username not configured');
+      }
+
+      for (const channel of this.channels) {
+        try {
+          const user = await this.apiClient.users.getUserByName(channel);
+          if (!user) continue;
+
+          // Only subscribe to events for the bot's channel
+          if (channel.toLowerCase() === this.botUsername.toLowerCase()) {
+            this.eventSubListener.onStreamOnline(user.id, async (e) => {
+              this.emit('streamOnline', { channel, stream: e });
+              await this.handleStreamOnline(channel, e);
+            });
+
+            this.eventSubListener.onStreamOffline(user.id, async () => {
+              this.emit('streamOffline', { channel });
+              await this.handleStreamOffline(channel);
+            });
+
+            logger.info(`EventSub subscriptions setup for channel: ${channel}`);
+          }
+        } catch (error) {
+          logger.warn(`Skipping EventSub setup for ${channel}:`, error.message);
+        }
+      }
+
+      // Start the listener after all subscriptions are set up
+      if (this.eventSubListener) {
+        await this.eventSubListener.start();
+        logger.info('EventSub listener started successfully');
+      }
+    } catch (error) {
+      logger.error('Error setting up EventSub:', error);
+      throw error;
+    }
+  }
+
+  async handleStreamOnline(channel, streamInfo) {
+    try {
+      this.lastStreamAnalysis.delete(channel); // Reset analysis timer
+      logger.info(`Stream went online in channel ${channel}`);
+      
+      // Schedule first analysis
+      setTimeout(() => this.analyzeStream(channel, streamInfo), 5 * 60 * 1000); // Wait 5 minutes
+    } catch (error) {
+      logger.error(`Error handling stream online for ${channel}:`, error);
+    }
+  }
+
+  async handleStreamOffline(channel) {
+    try {
+      this.lastStreamAnalysis.delete(channel);
+      this.streamMonitors.delete(channel);
+      logger.info(`Stream went offline in channel ${channel}`);
+    } catch (error) {
+      logger.error(`Error handling stream offline for ${channel}:`, error);
+    }
   }
 
   async getGameImageUrl(gameName) {
@@ -105,7 +198,12 @@ export default class TwitchEventManager extends EventEmitter {
   }
 
   setupEventHandlers() {
-    this.chatClient.onMessage(async (channel, user, message, msg) => {
+    if (!this.chatClient) {
+      throw new Error('Chat client not initialized');
+    }
+
+    // Use addListener instead of on for Twurple v7
+    this.chatClient.addListener('message', async (channel, user, message, msg) => {
       try {
         logger.debug(`Received message: ${message}`);
         
@@ -127,11 +225,9 @@ export default class TwitchEventManager extends EventEmitter {
             args,
             commandName,
             rawMessage: msg,
-            // Add required clients
             chatClient: this.chatClient,
             apiClient: this.apiClient,
             say: async (text) => {
-              // Log first, then send
               if (this.messageLogger) {
                 await this.messageLogger.logBotMessage(channel, text);
               }
@@ -140,7 +236,6 @@ export default class TwitchEventManager extends EventEmitter {
           });
         }
 
-        // Fix: Pass channel string directly instead of object
         const messageData = {
           channel: channel.replace('#', ''),
           userId: msg.userInfo.userId,
@@ -150,10 +245,8 @@ export default class TwitchEventManager extends EventEmitter {
           color: msg.userInfo.color
         };
 
-        // Emit the chat message event
         this.emit('chatMessage', messageData);
 
-        // Log the message
         if (this.messageLogger) {
           await this.messageLogger.logMessage(channel.replace('#', ''), messageData);
         }
@@ -162,20 +255,39 @@ export default class TwitchEventManager extends EventEmitter {
       }
     });
 
-    this.chatClient.onJoin((channel, username) => {
+    this.chatClient.addListener('join', (channel, username) => {
       const channelName = channel.replace(/^#/, '').toLowerCase();
-      // Only add to channels if it's not already there
       if (!this.channels.has(channelName)) {
         this.channels.add(channelName);
         logger.info(`Joined channel: ${channelName}`);
+        this.emit('channelJoined', channelName);
       }
     });
 
-    this.chatClient.onPart((channel, username) => {
+    this.chatClient.addListener('part', (channel, username) => {
       const channelName = channel.replace(/^#/, '').toLowerCase();
       this.channels.delete(channelName);
       logger.info(`Left channel: ${channelName}`);
+      this.emit('channelLeft', channelName);
     });
+
+    // Update error handling for Twurple v7
+    this.chatClient.addListener('authenticationFailure', (message) => {
+      logger.error('Authentication failure:', message);
+      this.emit('error', new Error(`Authentication failure: ${message}`));
+    });
+
+    this.chatClient.addListener('disconnected', (manually, reason) => {
+      logger.error('Chat disconnected:', { manually, reason });
+      this.emit('error', new Error(`Chat disconnected: ${reason}`));
+    });
+
+    // Add general error handling through EventEmitter
+    this.addListener('error', (error) => {
+      logger.error('TwitchEventManager error:', error);
+    });
+
+    logger.debug('Event handlers set up successfully');
   }
 
   getChannels() {
@@ -217,58 +329,20 @@ export default class TwitchEventManager extends EventEmitter {
     this.messageLogger = logger;
   }
 
-  async initialize(claudeHandler = null) {
-    try {
-      logger.info('Starting TwitchEventManager initialization...');
-      
-      if (claudeHandler) {
-        this.setCluadeHandler(claudeHandler);
-      }
-      
-      this.setupEventHandlers();
-
-      // Get current channels from chatClient
-      const currentChannels = (this.chatClient.channels || [])
-        .map(ch => ch.replace(/^#/, ''));
-      
-      // Filter out channels we're already in
-      const channelsToJoin = [...this.channels].filter(ch => 
-        !currentChannels.includes(ch.toLowerCase())
-      );
-
-      logger.debug(`Current channels: ${currentChannels.join(', ')}`);
-      logger.debug(`Channels to join: ${channelsToJoin.join(', ')}`);
-
-      // Join only new channels
-      for (const channel of channelsToJoin) {
-        try {
-          await this.joinChannel(channel);
-          // Add small delay between joins to prevent rate limiting
-          await new Promise(resolve => setTimeout(resolve, 100));
-        } catch (error) {
-          logger.error(`Failed to join channel ${channel}:`, error);
-        }
-      }
-
-      // Start stream monitoring
-      this.startStreamMonitoring();
-    } catch (error) {
-      logger.error('Error initializing TwitchEventManager:', error);
-      throw error;
-    }
-  }
-
   async startStreamMonitoring() {
-    // Check streams every minute
-    setInterval(async () => {
-      for (const channel of this.channels) {
-        try {
-          await this.checkStreamStatus(channel);
-        } catch (error) {
-          logger.error(`Error checking stream status for ${channel}:`, error);
+    // Check initial stream status for all channels
+    for (const channel of this.channels) {
+      try {
+        const isLive = await this.isChannelLive(channel);
+        if (isLive) {
+          const user = await this.apiClient.users.getUserByName(channel);
+          const stream = await this.apiClient.streams.getStreamByUserId(user.id);
+          await this.handleStreamOnline(channel, stream);
         }
+      } catch (error) {
+        logger.error(`Error checking initial stream status for ${channel}:`, error);
       }
-    }, 60000); // Check every minute
+    }
   }
 
   async checkStreamStatus(channel) {
@@ -296,6 +370,16 @@ export default class TwitchEventManager extends EventEmitter {
 
   async analyzeStream(channel, stream) {
     try {
+      // Add a cooldown check
+      const lastAnalysis = this.lastStreamAnalysis.get(channel);
+      const now = Date.now();
+      const ANALYSIS_COOLDOWN = 10 * 60 * 1000; // 10 minutes
+
+      if (lastAnalysis && now - lastAnalysis < ANALYSIS_COOLDOWN) {
+        logger.debug(`Skipping analysis for ${channel} - cooldown active`);
+        return;
+      }
+
       const streamData = {
         title: stream.title,
         game: stream.gameName,
@@ -305,19 +389,27 @@ export default class TwitchEventManager extends EventEmitter {
           .replace('{height}', '720')
       };
 
-      // Generate analysis prompt without viewer count
-      const prompt = `Analyze this Twitch stream:
-        Channel: ${channel}
-        Title: ${streamData.title}
-        Game: ${streamData.game}
-        Uptime: ${this.getStreamUptime(streamData.startTime)}
-        
-        Generate a casual, friendly comment about the stream as if you're talking to the broadcaster.
-        Reference specific details about what they're doing in the game or stream.
-        Keep it natural and chat-friendly, using appropriate 7TV emotes.`;
-
-      // Use Claude to analyze if handler is available
+      // Only proceed if Claude handler exists and no recent message was sent
       if (this.claudeHandler?.anthropic) {
+        // Check if Claude handler recently sent a message
+        const lastAutonomousMessage = this.claudeHandler.lastAutonomousMessage.get(channel);
+        if (lastAutonomousMessage && now - lastAutonomousMessage < ANALYSIS_COOLDOWN) {
+          logger.debug(`Skipping analysis - Claude recently sent message in ${channel}`);
+          return;
+        }
+
+        // Generate analysis prompt without viewer count
+        const prompt = `Analyze this Twitch stream:
+          Channel: ${channel}
+          Title: ${streamData.title}
+          Game: ${streamData.game}
+          Uptime: ${this.getStreamUptime(streamData.startTime)}
+          
+          Generate a casual, friendly comment about the stream as if you're talking to the broadcaster.
+          Reference specific details about what they're doing in the game or stream.
+          Keep it natural and chat-friendly, using appropriate 7TV emotes.`;
+
+        // Use Claude to analyze if handler is available
         const response = await this.claudeHandler.anthropic.messages.create({
           model: "claude-3-sonnet-20240229",
           max_tokens: 100,
@@ -333,8 +425,11 @@ export default class TwitchEventManager extends EventEmitter {
 
         const comment = response.content[0].text;
         
-        // Send the comment to chat
+        // Send the comment and update both tracking systems
         await this.chatClient.say(channel, `@${channel} ${comment}`);
+        this.lastStreamAnalysis.set(channel, now);
+        this.claudeHandler.lastAutonomousMessage.set(channel, now);
+        
         logger.info(`Sent stream analysis comment in ${channel}: ${comment}`);
       }
     } catch (error) {
@@ -379,5 +474,45 @@ export default class TwitchEventManager extends EventEmitter {
   setCluadeHandler(handler) {
     this.claudeHandler = handler;
     logger.info('Claude handler set in TwitchEventManager');
+  }
+
+  // Add method to cleanup resources
+  async cleanup() {
+    try {
+      // Stop EventSub listener
+      if (this.eventSubListener) {
+        await this.eventSubListener.stop();
+      }
+      
+      // Clear any existing timers or monitors
+      this.streamMonitors.clear();
+      this.lastStreamAnalysis.clear();
+      
+      logger.info('TwitchEventManager cleanup completed');
+    } catch (error) {
+      logger.error('Error during TwitchEventManager cleanup:', error);
+    }
+  }
+
+  // Add these utility methods
+  isMod(userInfo) {
+    return userInfo.isMod || userInfo.isBroadcaster;
+  }
+
+  isVip(userInfo) {
+    return userInfo.isVip || userInfo.isMod || userInfo.isBroadcaster;
+  }
+
+  // Helper method to check broadcaster
+  isBroadcaster(userInfo) {
+    return userInfo.isBroadcaster;
+  }
+
+  // Helper method to check user levels
+  getUserLevel(userInfo) {
+    if (this.isBroadcaster(userInfo)) return 'broadcaster';
+    if (this.isMod(userInfo)) return 'moderator';
+    if (this.isVip(userInfo)) return 'vip';
+    return 'user';
   }
 }
