@@ -77,38 +77,18 @@ class MessageLogger extends EventEmitter {
     }
   }
 
-  async logBotMessage(channel, message, metadata = {}) {
-    if (!this.initialized) {
-      await this.initialize();
-    }
-
+  static async logBotMessage(channel, message) {
     try {
-      this.logger.debug(`Processing bot message in ${channel}`);
-      
-      // Log to Winston
-      this.logger.info('Bot Message', {
-        type: 'bot',
+      // Implementation
+      await this.logMessage({
         channel,
+        username: 'BOT',
         message,
-        timestamp: new Date().toISOString(),
-        ...metadata
-      });
-
-      // Log to database if available
-      if (this.db) {
-        await this.db.logMessage(channel, 'BOT', message, '0', metadata);
-      }
-
-      // Emit message event
-      this.emit('message', {
-        type: 'bot',
-        channel,
-        message,
-        timestamp: new Date().toISOString(),
-        ...metadata
+        userId: '0',
+        timestamp: new Date()
       });
     } catch (error) {
-      this.logger.error('Error logging bot message:', { error, channel });
+      logger.error('Error logging bot message:', error);
     }
   }
 

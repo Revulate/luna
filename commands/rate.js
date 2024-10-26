@@ -274,3 +274,15 @@ export function setupRate(chatClient) {
     all: (context) => rateHandler.handleAllCommand(context)
   };
 }
+
+export default {
+  async execute({ channel, user, args, say, commandName }) {
+    try {
+      const rateHandler = new Rate();
+      await rateHandler.handleCommand(commandName, { channel, user, args, say });
+    } catch (error) {
+      logger.error('Error executing rate command:', error);
+      await say('Sorry, I encountered an error processing your request.');
+    }
+  }
+};

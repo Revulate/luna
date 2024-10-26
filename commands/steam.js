@@ -9,6 +9,8 @@ import path from 'path';
 import * as fuzzball from 'fuzzball';
 import { metaphone } from 'metaphone';
 import { MessageLogger } from '../utils/MessageLogger.js';
+import { serviceRegistry } from '../utils/serviceRegistry.js';
+import FuzzySearcher from '../utils/fuzzySearch.js';
 
 class Spc {
   constructor(bot) {
@@ -152,6 +154,11 @@ class Spc {
         reviews: this.REVIEWS_CACHE_EXPIRY,
         gameDetails: this.GAME_DETAILS_CACHE_EXPIRY
       }
+    });
+
+    this.fuzzySearcher = new FuzzySearcher({
+      abbreviations: this.textVariations,
+      patterns: this.gamePatterns
     });
   }
 
@@ -376,284 +383,21 @@ class Spc {
     return { gameID, skipReviews, gameName };
   }
 
-  async findGameIdByName(gameName) {
-    logger.info(`Searching for game by name: ${gameName}`);
-    const normalizedGameName = this._normalizeGameName(gameName);
-    const lowerGameName = normalizedGameName.toLowerCase();
-    
-    // First check cache
-    if (this.gameCache.has(lowerGameName)) {
-        return this.gameCache.get(lowerGameName).id;
-    }
-
+  async findGameByName(gameName) {
     try {
-        // First try exact matches with common variations
-        const variationMatch = this.gamePatterns[lowerGameName];
-        if (variationMatch) {
-            const searchName = variationMatch;
-            // Add variations with and without special characters
-            const searchVariations = [
-                searchName,
-                searchName.replace(/[!?:]/g, ''),
-                searchName.replace(/[!?:]/g, ' '),
-                `%${searchName}%`,
-                `%${searchName.replace(/[!?:]/g, '')}%`,
-                `%${searchName.replace(/[!?:]/g, ' ')}%`
-            ];
-            
-            const exactMatches = this.preparedStatements.findGameByName.all(...searchVariations);
-            if (exactMatches.length > 0) {
-                const match = exactMatches[0];
-                this._updateGameCache(lowerGameName, match.ID);
-                return match.ID;
-            }
-        }
-
-        // If no variation match, try with original name
-        const searchPatterns = [
-            normalizedGameName,
-            `%${normalizedGameName}%`,
-            normalizedGameName.replace(/\s+/g, '%'),
-            `${normalizedGameName}%`,
-            `%${normalizedGameName}`,
-            `%${normalizedGameName}%`  // Fixed missing closing quote
-        ];
-
-        // Add patterns with special characters removed
-        const noSpecialChars = normalizedGameName.replace(/[!?:]/g, '');
-        searchPatterns.push(
-            noSpecialChars,
-            `%${noSpecialChars}%`,
-            noSpecialChars.replace(/\s+/g, '%')
-        );
-
-        // Ensure we have exactly 6 patterns
-        while (searchPatterns.length < 6) {
-            searchPatterns.push(searchPatterns[0]);
-        }
-        searchPatterns.length = 6;  // Trim to exactly 6 if we have too many
-
-        const results = this.preparedStatements.findGameByName.all(...searchPatterns);
-        let games = [...results];
-
-        // Only try typo patterns if we don't have good matches yet
-        if (games.length === 0) {
-            const typoPatterns = this._generateTypoPatterns(normalizedGameName);
-            for (let i = 0; i < typoPatterns.length; i += 6) {
-                const batch = typoPatterns.slice(i, i + 6);
-                while (batch.length < 6) {
-                    batch.push(batch[0]); // Pad with duplicates to match parameter count
-                }
-                const typoResults = this.preparedStatements.findGameByName.all(...batch);
-                games.push(...typoResults);
-            }
-        }
-
-        // Remove duplicates and filter out unwanted entries
-        games = [...new Map(games.map(game => [game.ID, game])).values()]
-            .filter(game => {
-                const name = game.Name.toLowerCase();
-                return !name.includes('soundtrack') &&
-                       !name.includes('artbook') &&
-                       !name.includes('dlc pack') &&
-                       !name.includes('season pass') &&
-                       !name.includes('demo version');
-            });
-
-        if (games.length === 0) {
-            return null;
-        }
-
-        // Enhanced scoring system
-        const matches = games.map(game => {
-            const gameName = game.Name.toLowerCase();
-            
-            // Split game name to handle prefixes and suffixes
-            const parts = gameName.split(/[:|-]/);
-            const mainTitle = parts[parts.length - 1].trim();
-            const prefix = parts.length > 1 ? parts[0].trim() : '';
-
-            // Calculate various fuzzy match scores
-            const scores = {
-                // Exact match with full name
-                exactMatch: gameName === lowerGameName ? 100 : 0,
-                
-                // Exact match with main title
-                mainTitleExact: mainTitle === lowerGameName ? 90 : 0,
-                
-                // Partial ratio for substring matching
-                partialRatio: fuzzball.partial_ratio(lowerGameName, mainTitle),
-                
-                // Token sort ratio for word order independence
-                tokenSortRatio: fuzzball.token_sort_ratio(lowerGameName, gameName),
-                
-                // Token set ratio for handling extra/missing words
-                tokenSetRatio: fuzzball.token_set_ratio(lowerGameName, mainTitle),
-                
-                // Prefix bonus if search term matches game series
-                prefixBonus: prefix && (
-                    lowerGameName.includes(prefix) || 
-                    prefix.includes(lowerGameName)
-                ) ? 20 : 0,
-                
-                // Article-aware matching
-                articleMatch: (() => {
-                    const searchVariations = this._normalizeWithArticles(lowerGameName);
-                    const gameVariations = this._normalizeWithArticles(mainTitle);
-                    
-                    // Check if any variations match
-                    const hasMatch = searchVariations.some(searchVar => 
-                        gameVariations.some(gameVar => gameVar === searchVar)
-                    );
-                    
-                    return hasMatch ? 100 : 0;
-                })(),
-                
-                // Main title contains search term (boosted for exact word matches)
-                containsBonus: (() => {
-                    const searchVariations = this._normalizeWithArticles(lowerGameName);
-                    if (searchVariations.some(v => mainTitle === v)) { return 30; }
-                    if (searchVariations.some(v => mainTitle.includes(` ${v} `))) { return 25; }
-                    if (searchVariations.some(v => mainTitle.includes(v))) { return 20; }
-                    return 0;
-                })(),
-                
-                // Acronym matching
-                acronymScore: this._calculateAcronymScore(lowerGameName, mainTitle),
-                
-                // Series matching
-                seriesScore: this._calculateSeriesScore(lowerGameName, gameName)
-            };
-
-            // Calculate total score
-            const totalScore = (
-                (scores.exactMatch * 0.25) +
-                (scores.mainTitleExact * 0.15) +
-                (scores.partialRatio * 0.15) +
-                (scores.tokenSortRatio * 0.10) +
-                (scores.tokenSetRatio * 0.10) +
-                (scores.prefixBonus * 0.05) +
-                (scores.containsBonus * 0.05) +
-                (scores.acronymScore * 0.025) +
-                (scores.seriesScore * 0.025) +
-                (scores.articleMatch * 0.15)
-            );
-
-            return {
-                game,
-                scores,
-                totalScore
-            };
-        });
-
-        // Sort by total score
-        matches.sort((a, b) => b.totalScore - a.totalScore);
-
-        // Log top matches for debugging
-        logger.debug(
-            `Top matches for "${normalizedGameName}":`,  // Changed to template literal
-            matches.slice(0, 3).map(m => ({
-                name: m.game.Name,
-                score: m.totalScore,
-                scores: m.scores
-            }))
-        );
-
-        // Return best match if score is high enough
-        if (matches[0].totalScore >= 50 || 
-            (matches[0].scores.partialRatio === 100 && 
-             matches[0].scores.tokenSetRatio === 100 && 
-             matches[0].totalScore >= 35)) {
-            const bestMatch = matches[0].game;
-            this._updateGameCache(lowerGameName, bestMatch.ID);
-            return bestMatch.ID;
-        }
-
-        // If no good match, return suggestions
-        if (matches.length > 0) {
-            const suggestions = matches
-                .slice(0, 3)
-                .map(m => `${m.game.Name} (${Math.round(m.totalScore)}% match)`)
-                .join(', ');
-            throw new Error(`No exact match found. Did you mean: ${suggestions}?`);
-        }
-
-        return null;
+      const allGames = this.preparedStatements.selectAllGames.all();
+      const { match, suggestions } = await this.fuzzySearcher.findMatch(gameName, allGames);
+      
+      if (match) return match;
+      if (suggestions.length > 0) {
+        throw new Error(`Did you mean one of these: ${suggestions.join(' • ')}?`);
+      }
+      return null;
     } catch (error) {
-        logger.error(`Error during game search: ${error}`);
-        throw error;
+      if (error.message.includes('Did you mean')) throw error;
+      logger.error('Error finding game:', error);
+      throw error;
     }
-  }
-
-  // Helper method to convert roman numerals
-  romanToArabic(roman) {
-    const romanNumerals = {
-        'i': 1,
-        'iv': 4,
-        'v': 5,
-        'ix': 9,
-        'x': 10,
-        'xl': 40,
-        'l': 50,
-        'xc': 90,
-        'c': 100,
-        'cd': 400,
-        'd': 500,
-        'cm': 900,
-        'm': 1000
-    };
-
-    let result = 0;
-    let input = roman.toLowerCase();
-
-    for (let i = 0; i < input.length; i++) {
-        const current = romanNumerals[input[i]];
-        const next = romanNumerals[input[i + 1]];
-
-        if (next && current < next) {
-            result += next - current;
-            i++;
-        } else {
-            result += current;
-        }
-    }
-
-    return result;
-  }
-
-  // Helper method to convert arabic to roman
-  arabicToRoman(num) {
-    const romanNumerals = [
-        ['m', 1000],
-        ['cm', 900],
-        ['d', 500],
-        ['cd', 400],
-        ['c', 100],
-        ['xc', 90],
-        ['l', 50],
-        ['xl', 40],
-        ['x', 10],
-        ['ix', 9],
-        ['v', 5],
-        ['iv', 4],
-        ['i', 1]
-    ];
-
-    let result = '';
-    for (const [roman, value] of romanNumerals) {
-        while (num >= value) {
-            result += roman;
-            num -= value;
-        }
-    }
-    return result;
-  }
-
-  _findBestMatch(gameName, games) {
-    return games.reduce((best, game) => {
-      const similarity = this.levenshteinDistance(gameName.toLowerCase(), game.Name.toLowerCase());
-      return similarity < best.similarity ? { game, similarity } : best;
-    }, { game: null, similarity: Infinity }).game;
   }
 
   _updateGameCache(key, value) {
@@ -856,60 +600,6 @@ class Spc {
     }
   }
 
-  normalizeGameName(gameName) {
-    let normalized = gameName.toLowerCase().trim();
-    
-    // Handle special game variations first
-    const gamePatterns = {
-        'gta 5': 'grand theft auto v',
-        'gta v': 'grand theft auto v',
-        'gta5': 'grand theft auto v',
-        'gtav': 'grand theft auto v',
-        'gta': 'grand theft auto',
-        'd4': 'diablo iv',
-        'd 4': 'diablo iv',
-        'diablo 4': 'diablo iv',
-        'diablo four': 'diablo iv',
-        'diablo': 'diablo iv'
-    };
-
-    // Check for exact pattern matches
-    for (const [pattern, replacement] of Object.entries(gamePatterns)) {
-        if (normalized === pattern || normalized.startsWith(pattern + ' ')) {
-            normalized = normalized.replace(pattern, replacement);
-            break;
-        }
-    }
-
-    // Handle number and roman numeral variations
-    const numberMap = {
-        '4': 'iv',
-        'four': 'iv',
-        'iv': 'iv',
-        '5': 'v',
-        'five': 'v',
-        'v': 'v',
-        '6': 'vi',
-        'six': 'vi',
-        'vi': 'vi'
-    };
-
-    // Replace number variations
-    for (const [num, replacement] of Object.entries(numberMap)) {
-        const regex = new RegExp(`\\b${num}\\b`, 'gi');
-        normalized = normalized.replace(regex, replacement);
-    }
-
-    // Basic text normalization
-    normalized = normalized
-        .replace(/[-_:]/g, ' ')
-        .replace(/[^\w\s]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-    return normalized;
-  }
-
   // Add new method to fetch DLC info
   async getGameDLC(appId) {
     const url = `https://store.steampowered.com/api/dlc/${appId}`;
@@ -921,44 +611,7 @@ class Spc {
     };
   }
 
-  // Add new helper method for number variations
-  checkNumberVariations(name1, name2) {
-    const numberMap = {
-        '4': ['iv', 'four'],
-        'iv': ['4', 'four'],
-        'four': ['4', 'iv'],
-        '5': ['v', 'five'],
-        'v': ['5', 'five'],
-        'five': ['5', 'v'],
-        '6': ['vi', 'six'],
-        'vi': ['6', 'six'],
-        'six': ['6', 'vi']
-    };
-
-    // Check if either string contains a number or roman numeral
-    const numbers = Object.keys(numberMap).join('|');
-    const regex = new RegExp(`\\b(${numbers})\\b`, 'gi');
-    
-    const matches1 = name1.match(regex);
-    const matches2 = name2.match(regex);
-    
-    if (!matches1 || !matches2) return false;
-    
-    // Check if the numbers are equivalent
-    for (const num1 of matches1) {
-        const variations = numberMap[num1.toLowerCase()] || [];
-        for (const num2 of matches2) {
-            if (num2.toLowerCase() === num1.toLowerCase() || 
-                variations.includes(num2.toLowerCase())) {
-                return true;
-            }
-        }
-    }
-    
-    return false;
-  }
-
-  // Add new method for handling stats
+  // Move all methods inside the class
   async handleStatsCommand(username, gameName, say) {
     if (!gameName) {
       await say(`@${username}, Please provide a game name.`);
@@ -1014,7 +667,7 @@ class Spc {
     }
   }
 
-  // Add new helper methods
+  // Add all other methods that were after the export
   _generateTypoPatterns(name) {
     const patterns = [];
     // Handle common typos by replacing similar characters
@@ -1065,7 +718,6 @@ class Spc {
     return 0;
   }
 
-  // Add this method to the class
   _simplePhonetic(str) {
     return str.toLowerCase()
         .replace(/[aeiou]/g, 'a')  // Convert all vowels to 'a'
@@ -1080,7 +732,6 @@ class Spc {
         .replace(/(\w)\1+/g, '$1'); // Remove repeated characters
   }
 
-  // Then modify the _fuzzySearch method to use the simple phonetic algorithm
   async _fuzzySearch(searchTerm) {
     const searchPhonetic = this._simplePhonetic(searchTerm);
     
@@ -1102,7 +753,6 @@ class Spc {
     return matches.length > 0 ? matches[0].game.ID : null;
   }
 
-  // Add new helper method for series matching
   _calculateSeriesScore(searchTerm, fullGameName) {
     const seriesPatterns = {
         'dragon ball': ['dbz', 'dragon ball z', 'kakarot', 'sparking', 'sparking zero'],
@@ -1129,7 +779,6 @@ class Spc {
     return 0;
   }
 
-  // Add this method to handle articles
   _normalizeWithArticles(name) {
     // List of articles to handle
     const articles = ['the', 'a', 'an'];
@@ -1153,7 +802,6 @@ class Spc {
     return variations;
   }
 
-  // Add a method to handle special characters in game names
   _normalizeGameName(name) {
     return name.toLowerCase()
         .replace(/[!?:]/g, '') // Remove special characters
@@ -1161,7 +809,6 @@ class Spc {
         .trim();
   }
 
-  // Add new methods from steam.js
   async handleSalesCommand(username, say, channel) {
     const cachedData = this.salesCache.get('current');
     if (cachedData && Date.now() - cachedData.timestamp < this.SALES_CACHE_EXPIRY) {
@@ -1198,87 +845,81 @@ class Spc {
     }
   }
 
-  // Add these methods right after handleSalesCommand in the Spc class
-
   async handleProfileCommand(username, query, say, channel) {
-    if (!query) {
-        const response = `@${username}, Please provide a Steam profile ID or URL.`;
-        await MessageLogger.logBotMessage(channel, response);
-        await say(response);
-        return;
-    }
-
     try {
-        const steamId = await this.resolveSteamId(query);
-        if (!steamId) {
-            const response = `@${username}, Could not find Steam profile for: ${query}`;
-            await MessageLogger.logBotMessage(channel, response);
-            await say(response);
-            return;
-        }
+      const steamId = await this.resolveSteamId(query || username);
+      if (!steamId) {
+        const noIdMsg = `@${username}, Could not find Steam ID for that user.`;
+        const messageLogger = serviceRegistry.getService('messageLogger');
+        await messageLogger.logUserMessage(channel, 'BOT', noIdMsg);
+        await say(noIdMsg);
+        return;
+      }
 
-        // Fetch profile, owned games, and recent playtime in parallel
-        const [profileResponse, gamesResponse] = await Promise.all([
-            fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${this.steamApiKey}&steamids=${steamId}`),
-            fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${this.steamApiKey}&steamid=${steamId}&include_played_free_games=true&include_appinfo=true`)
-        ]);
+      // Fetch profile, owned games, and recent playtime in parallel
+      const [profileResponse, gamesResponse] = await Promise.all([
+        fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${this.steamApiKey}&steamids=${steamId}`),
+        fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${this.steamApiKey}&steamid=${steamId}&include_played_free_games=true&include_appinfo=true`)
+      ]);
 
-        const [profileData, gamesData] = await Promise.all([
-            profileResponse.json(),
-            gamesResponse.json()
-        ]);
+      const [profileData, gamesData] = await Promise.all([
+        profileResponse.json(),
+        gamesResponse.json()
+      ]);
 
-        if (!profileData.response?.players?.[0]) {
-            const response = `@${username}, No profile data found for: ${query}`;
-            await MessageLogger.logBotMessage(channel, response);
-            await say(response);
-            return;
-        }
+      if (!profileData.response?.players?.[0]) {
+        const noProfileMsg = `@${username}, No profile data found for: ${query}`;
+        const messageLogger = serviceRegistry.getService('messageLogger');
+        await messageLogger.logUserMessage(channel, 'BOT', noProfileMsg);
+        await say(noProfileMsg);
+        return;
+      }
 
-        const profile = profileData.response.players[0];
-        const games = gamesData.response;
-        const status = this.getPlayerStatus(profile);
-        
-        // Calculate statistics with proper formatting
-        const totalGames = games?.game_count || 0;
-        const totalPlaytime = games?.games?.reduce((total, game) => total + (game.playtime_forever || 0), 0) || 0;
-        const totalHours = (Math.round(totalPlaytime / 60)).toLocaleString(); // Add thousands separator
-        const recentPlaytime = games?.games?.reduce((total, game) => total + (game.playtime_2weeks || 0), 0) || 0;
-        const recentHours = Math.round(recentPlaytime / 60 * 10) / 10;
+      const profile = profileData.response.players[0];
+      const games = gamesData.response;
+      const status = this.getPlayerStatus(profile);
+      
+      // Calculate statistics with proper formatting
+      const totalGames = games?.game_count || 0;
+      const totalPlaytime = games?.games?.reduce((total, game) => total + (game.playtime_forever || 0), 0) || 0;
+      const totalHours = (Math.round(totalPlaytime / 60)).toLocaleString(); // Add thousands separator
+      const recentPlaytime = games?.games?.reduce((total, game) => total + (game.playtime_2weeks || 0), 0) || 0;
+      const recentHours = Math.round(recentPlaytime / 60 * 10) / 10;
 
-        // Get currently playing game if any
-        const currentGame = profile.gameextrainfo ? ` (${profile.gameextrainfo})` : '';
-        const statusText = status === 'Online' ? `${status}${currentGame}` : status;
+      // Get currently playing game if any
+      const currentGame = profile.gameextrainfo ? ` (${profile.gameextrainfo})` : '';
+      const statusText = status === 'Online' ? `${status}${currentGame}` : status;
 
-        // Most played game with formatted hours
-        const mostPlayed = games?.games?.reduce((max, game) => 
-            (game.playtime_forever > (max?.playtime_forever || 0)) ? game : max, null);
-        const mostPlayedHours = mostPlayed ? 
-            Math.round(mostPlayed.playtime_forever / 60).toLocaleString() : '0';
-        const mostPlayedStr = mostPlayed ? 
-            `${mostPlayed.name} (${mostPlayedHours}hrs)` : 
-            'None';
+      // Most played game with formatted hours
+      const mostPlayed = games?.games?.reduce((max, game) => 
+        (game.playtime_forever > (max?.playtime_forever || 0)) ? game : max, null);
+      const mostPlayedHours = mostPlayed ? 
+        Math.round(mostPlayed.playtime_forever / 60).toLocaleString() : '0';
+      const mostPlayedStr = mostPlayed ? 
+        `${mostPlayed.name} (${mostPlayedHours}hrs)` : 
+        'None';
 
-        const response = `@${username}, Profile: ${profile.personaname} • ` +
-                        `Status: ${statusText} • ` +
-                        `Games: ${totalGames.toLocaleString()} • ` +
-                        `Total: ${totalHours}hrs • ` +
-                        `Recent: ${recentHours}hrs • ` +
-                        `Most Played: ${mostPlayedStr} • ` +
-                        `Profile: ${profile.profileurl}`;
+      const response = `@${username}, Profile: ${profile.personaname} • ` +
+                      `Status: ${statusText} • ` +
+                      `Games: ${totalGames.toLocaleString()} • ` +
+                      `Total: ${totalHours}hrs • ` +
+                      `Recent: ${recentHours}hrs • ` +
+                      `Most Played: ${mostPlayedStr} • ` +
+                      `Profile: ${profile.profileurl}`;
 
-        await MessageLogger.logBotMessage(channel, response);
-        await say(response);
+      const messageLogger = serviceRegistry.getService('messageLogger');
+      await messageLogger.logUserMessage(channel, 'BOT', response);
+      await say(response);
 
     } catch (error) {
-        logger.error('Error fetching Steam profile:', error);
-        const errorResponse = `@${username}, Error fetching Steam profile: ${error.message}`;
-        await MessageLogger.logBotMessage(channel, errorResponse);
-        await say(errorResponse);
+      logger.error('Error in handleProfileCommand:', error);
+      const errorMsg = `@${username}, Failed to fetch profile.`;
+      const messageLogger = serviceRegistry.getService('messageLogger');
+      await messageLogger.logUserMessage(channel, 'BOT', errorMsg);
+      await say(errorMsg);
     }
   }
 
-  // Helper method to resolve Steam ID from various formats
   async resolveSteamId(query) {
     // If it's already a Steam64 ID
     if (/^\d{17}$/.test(query)) {
@@ -1311,7 +952,6 @@ class Spc {
     return null;
   }
 
-  // Helper method to get player status
   getPlayerStatus(profile) {
     const statusMap = {
         0: 'Offline',
@@ -1332,95 +972,149 @@ class Spc {
 
   async handleRecentGamesCommand(username, query, say, channel) {
     try {
-        const steamId = await this.resolveSteamId(query || username);
-        if (!steamId) {
-            const noIdMsg = `@${username}, Could not find Steam ID for that user.`;
-            await MessageLogger.logBotMessage(channel, noIdMsg);
-            await say(noIdMsg);
-            return;
-        }
+      const steamId = await this.resolveSteamId(query || username);
+      if (!steamId) {
+        const noIdMsg = `@${username}, Could not find Steam ID for that user.`;
+        const messageLogger = serviceRegistry.getService('messageLogger');
+        await messageLogger.logUserMessage(channel, 'BOT', noIdMsg);
+        await say(noIdMsg);
+        return;
+      }
 
-        const apiResponse = await fetch(
-            `https://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v1/?key=${this.steamApiKey}&steamid=${steamId}&count=5`
-        );
-        const data = await apiResponse.json();
+      const apiResponse = await fetch(
+        `https://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v1/?key=${this.steamApiKey}&steamid=${steamId}&count=5`
+      );
+      const data = await apiResponse.json();
 
-        if (!data.response || !data.response.games || data.response.games.length === 0) {
-            const noGamesMsg = `@${username}, No recently played games found for that user.`;
-            await MessageLogger.logBotMessage(channel, noGamesMsg);
-            await say(noGamesMsg);
-            return;
-        }
+      if (!data.response || !data.response.games || data.response.games.length === 0) {
+        const noGamesMsg = `@${username}, No recently played games found for that user.`;
+        const messageLogger = serviceRegistry.getService('messageLogger');
+        await messageLogger.logUserMessage(channel, 'BOT', noGamesMsg);
+        await say(noGamesMsg);
+        return;
+      }
 
-        const games = data.response.games.map(game => {
-            const hours = Math.round(game.playtime_2weeks / 60 * 10) / 10;
-            return `${game.name} (${hours}hrs)`;
-        });
+      const games = data.response.games.map(game => {
+        const hours = Math.round(game.playtime_2weeks / 60 * 10) / 10;
+        return `${game.name} (${hours}hrs)`;
+      });
 
-        const totalHours = Math.round(data.response.games.reduce((total, game) => 
-            total + (game.playtime_2weeks / 60), 0) * 10) / 10;
+      const totalHours = Math.round(data.response.games.reduce((total, game) => 
+        total + (game.playtime_2weeks / 60), 0) * 10) / 10;
 
-        const recentGamesMsg = `@${username}, Recent games: ${games.join(', ')} • Total past 2 weeks: ${totalHours}hrs`;
-        await MessageLogger.logBotMessage(channel, recentGamesMsg);
-        await say(recentGamesMsg);
+      const recentGamesMsg = `@${username}, Recent games: ${games.join(', ')} • Total past 2 weeks: ${totalHours}hrs`;
+      const messageLogger = serviceRegistry.getService('messageLogger');
+      await messageLogger.logUserMessage(channel, 'BOT', recentGamesMsg);
+      await say(recentGamesMsg);
 
     } catch (error) {
-        logger.error('Error in handleRecentGamesCommand:', error);
-        const errorMsg = `@${username}, Failed to fetch recent games.`;
-        await MessageLogger.logBotMessage(channel, errorMsg);
-        await say(errorMsg);
+      logger.error('Error in handleRecentGamesCommand:', error);
+      const errorMsg = `@${username}, Failed to fetch recent games.`;
+      const messageLogger = serviceRegistry.getService('messageLogger');
+      await messageLogger.logUserMessage(channel, 'BOT', errorMsg);
+      await say(errorMsg);
     }
   }
 
   async handleAvatarCommand(username, query, say, channel) {
     try {
-        const steamId = await this.resolveSteamId(query || username);
-        if (!steamId) {
-            const noIdMsg = `@${username}, Could not find Steam ID for that user.`;
-            await MessageLogger.logBotMessage(channel, noIdMsg);
-            await say(noIdMsg);
-            return;
-        }
+      const steamId = await this.resolveSteamId(query || username);
+      if (!steamId) {
+        const noIdMsg = `@${username}, Could not find Steam ID for that user.`;
+        const messageLogger = serviceRegistry.getService('messageLogger');
+        await messageLogger.logUserMessage(channel, 'BOT', noIdMsg);
+        await say(noIdMsg);
+        return;
+      }
 
-        const apiResponse = await fetch(
-            `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${this.steamApiKey}&steamids=${steamId}`
-        );
-        const data = await apiResponse.json();
+      const apiResponse = await fetch(
+        `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${this.steamApiKey}&steamids=${steamId}`
+      );
+      const data = await apiResponse.json();
 
-        if (!data.response?.players?.[0]) {
-            const noProfileMsg = `@${username}, Could not find Steam profile for that user.`;
-            await MessageLogger.logBotMessage(channel, noProfileMsg);
-            await say(noProfileMsg);
-            return;
-        }
+      if (!data.response?.players?.[0]) {
+        const noProfileMsg = `@${username}, Could not find Steam profile for that user.`;
+        const messageLogger = serviceRegistry.getService('messageLogger');
+        await messageLogger.logUserMessage(channel, 'BOT', noProfileMsg);
+        await say(noProfileMsg);
+        return;
+      }
 
-        const profile = data.response.players[0];
-        const avatarMsg = `@${username}, ${profile.personaname}'s avatar: ${profile.avatarfull}`;
-        await MessageLogger.logBotMessage(channel, avatarMsg);
-        await say(avatarMsg);
+      const profile = data.response.players[0];
+      const avatarMsg = `@${username}, ${profile.personaname}'s avatar: ${profile.avatarfull}`;
+      const messageLogger = serviceRegistry.getService('messageLogger');
+      await messageLogger.logUserMessage(channel, 'BOT', avatarMsg);
+      await say(avatarMsg);
 
     } catch (error) {
-        logger.error('Error in handleAvatarCommand:', error);
-        const errorMsg = `@${username}, Failed to fetch avatar.`;
-        await MessageLogger.logBotMessage(channel, errorMsg);
-        await say(errorMsg);
+      logger.error('Error in handleAvatarCommand:', error);
+      const errorMsg = `@${username}, Failed to fetch avatar.`;
+      const messageLogger = serviceRegistry.getService('messageLogger');
+      await messageLogger.logUserMessage(channel, 'BOT', errorMsg);
+      await say(errorMsg);
     }
   }
 }
 
-// Modify the export to handle both commands
-export function setupSteam(bot) {
-  logger.startOperation('Setting up Steam command');
-  const spc = new Spc(bot);
-  spc.initialize();
-  
-  process.on('exit', () => {
-    spc.cleanup();
-  });
-  
-  logger.endOperation('Setting up Steam command', true);
-  return {
-    spc: async (context) => await spc.handleCommand({ ...context, commandName: 'spc' }),
-    steam: async (context) => await spc.handleCommand({ ...context, commandName: 'steam' })
-  };
-}
+// Create single instance
+const steamHandler = new Spc();
+
+// Single default export
+export default {
+  name: 'steam',
+  aliases: ['spc'], // Add aliases property
+  description: 'Steam-related commands',
+  async execute({ channel, user, args, say }) {
+    try {
+      // Initialize if not already done
+      if (!steamHandler.initialized) {
+        await steamHandler.initialize();
+      }
+
+      // No arguments provided
+      if (!args.length) {
+        const messageLogger = serviceRegistry.getService('messageLogger');
+        const helpMsg = `@${user.username}, Usage: #steam [profile|recent|avatar|stats] [steamID/URL/game]`;
+        await messageLogger.logUserMessage(channel, 'BOT', helpMsg);
+        await say(helpMsg);
+        return;
+      }
+
+      const subCommand = args[0].toLowerCase();
+      const query = args.slice(1).join(' ');
+
+      // Special handling for spc alias
+      if (this.name === 'spc') {
+        await steamHandler.handleStatsCommand(user.username, args.join(' '), say);
+        return;
+      }
+
+      switch (subCommand) {
+        case 'profile':
+          await steamHandler.handleProfileCommand(user.username, query, say, channel);
+          break;
+        case 'recent':
+          await steamHandler.handleRecentGamesCommand(user.username, query, say, channel);
+          break;
+        case 'avatar':
+          await steamHandler.handleAvatarCommand(user.username, query, say, channel);
+          break;
+        case 'stats':
+          await steamHandler.handleStatsCommand(user.username, query, say);
+          break;
+        default:
+          // Try stats command if no subcommand matches
+          const messageLogger = serviceRegistry.getService('messageLogger');
+          const invalidMsg = `@${user.username}, Invalid subcommand. Available commands: profile, recent, avatar, stats`;
+          await messageLogger.logUserMessage(channel, 'BOT', invalidMsg);
+          await say(invalidMsg);
+      }
+    } catch (error) {
+      logger.error('Error executing Steam command:', error);
+      const messageLogger = serviceRegistry.getService('messageLogger');
+      const errorMsg = `@${user.username}, An error occurred while processing your request.`;
+      await messageLogger.logUserMessage(channel, 'BOT', errorMsg);
+      await say(errorMsg);
+    }
+  }
+};

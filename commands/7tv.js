@@ -367,3 +367,15 @@ export async function setup7tv(context) {
   logger.info('Loaded command: 7tv');
   logger.endOperation('Setting up 7TV command', true);
 }
+
+export default {
+  async execute({ channel, user, args, say }) {
+    try {
+      const response = await handle7tvCommand(channel, user, args);
+      await say(response);
+    } catch (error) {
+      logger.error('Error executing 7TV command:', error);
+      await say('Sorry, I encountered an error processing your request.');
+    }
+  }
+};

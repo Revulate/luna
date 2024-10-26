@@ -135,10 +135,14 @@ class PreviewHandler {
   }
 }
 
-export function setupPreview(chatClient) {
-  const handler = new PreviewHandler(chatClient);
-  
-  return {
-    preview: async (context) => await handler.handlePreview(context)
-  };
-}
+export default {
+  async execute({ channel, user, args, say }) {
+    try {
+      const response = await handlePreview(channel, user, args);
+      await say(response);
+    } catch (error) {
+      logger.error('Error executing preview command:', error);
+      await say('Sorry, I encountered an error generating the preview.');
+    }
+  }
+};

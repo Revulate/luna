@@ -9,7 +9,7 @@ import { twitchEventManager } from './utils/TwitchEventManager.js';
 import messageLogger from './utils/MessageLogger.js';
 import { webPanel } from './webPanel.js';
 import dbManager from './utils/database.js';
-import { commandManager } from './utils/commandSetup.js';
+import { setupCommands } from './utils/commandSetup.js';
 import { serviceRegistry } from './utils/serviceRegistry.js';
 import { performHealthCheck } from './utils/healthCheck.js';
 
@@ -52,57 +52,74 @@ const initializationOrder = [
   'database',
   'messageLogger', 
   'twitchEventManager',
-  'commands',
+  'commands',  // Make sure commands are initialized after twitchEventManager
   'webPanel'
 ];
 
-async function initializeServices() {
-  logger.startOperation('Service initialization');
+// Add this function before initializeBot
+async function initializeDatabase() {
+  logger.startOperation('Initializing database');
   try {
-    // Initialize auth and clients first
+    await dbManager.initialize();
+    logger.info('Database initialized successfully');
+    logger.endOperation('Initializing database', true);
+  } catch (error) {
+    logger.error('Error initializing database:', error);
+    logger.endOperation('Initializing database', false);
+    throw error;
+  }
+}
+
+async function initializeBot() {
+  logger.startOperation('Bot startup');
+  
+  try {
+    // Initialize services
+    logger.startOperation('Service initialization');
+    
+    // Setup auth and clients
     const authProvider = await setupAuth();
     const apiClient = new ApiClient({ authProvider });
-    const chatClient = new ChatClient({ authProvider });
-    
-    // Register core services immediately
+    const chatClient = new ChatClient({ 
+      authProvider,
+      // Use config.twitch.channels instead of config.channels
+      channels: config.twitch.channels,
+      logger: logger
+    });
+
+    // Register core services
     serviceRegistry.register('apiClient', apiClient);
     serviceRegistry.register('chatClient', chatClient);
 
-    // Initialize database first since other services depend on it
-    await dbManager.initialize();
-    serviceRegistry.register('database', dbManager);
-    logger.info('Database initialized successfully');
-
-    // Initialize and register MessageLogger
+    // Initialize database and message logger
+    await initializeDatabase();
     await messageLogger.initialize();
     serviceRegistry.register('messageLogger', messageLogger);
 
-    // Initialize TwitchEventManager with required dependencies
+    // Initialize TwitchEventManager
     await twitchEventManager.initialize({
       chatClient,
       apiClient,
       messageLogger
     });
 
-    // Initialize command manager after TwitchEventManager
-    await commandManager.initialize({
-      chatClient,
-      apiClient,
-      twitchEventManager
-    });
-    serviceRegistry.register('commands', commandManager);
+    // Setup commands after TwitchEventManager
+    const commands = await setupCommands(chatClient);
+    serviceRegistry.register('commands', commands);
 
-    // Initialize web panel last
+    // Initialize web panel
     await webPanel.initialize();
     serviceRegistry.register('webPanel', webPanel);
 
-    // Connect chat client after all services are ready
+    // Connect chat client
     await chatClient.connect();
     logger.info('Chat client connected successfully');
 
-    // Join configured channels
-    const channels = config.twitch.channels;
-    for (const channel of channels) {
+    // Join channels from config.twitch.channels
+    const channelsToJoin = config.twitch.channels;
+    logger.debug('Channels to join:', channelsToJoin);
+    
+    for (const channel of channelsToJoin) {
       try {
         await chatClient.join(channel);
         logger.info(`Joined channel: ${channel}`);
@@ -113,8 +130,9 @@ async function initializeServices() {
 
     logger.info('Bot initialization complete');
     logger.endOperation('Service initialization', true);
+
   } catch (error) {
-    logger.error('Error during initialization:', error);
+    logger.error('Error during bot initialization:', error);
     logger.endOperation('Service initialization', false);
     throw error;
   }
@@ -151,20 +169,8 @@ async function setupAuth() {
 }
 
 async function main() {
-  logger.startOperation('Bot startup');
-  try {
-    // Initialize all services first
-    await initializeServices();
-    
-    // Perform health check after services are initialized
-    await performHealthCheck();
-    
-    logger.endOperation('Bot startup', true);
-  } catch (error) {
-    logger.error('Failed to start bot:', error);
-    logger.endOperation('Bot startup', false);
-    process.exit(1);
-  }
+  await initializeBot();
+  await performHealthCheck();
 }
 
 main();

@@ -135,3 +135,15 @@ export function setupMessageLookup(chatClient) {
   logger.endOperation('Setting up MessageLookup command');
   return handler;
 }
+
+export default {
+  async execute({ channel, user, args, say, commandName }) {
+    try {
+      const handler = new MessageLookup();
+      await handler.handleCommand(commandName, { channel, user, args, say });
+    } catch (error) {
+      logger.error('Error executing message lookup command:', error);
+      await say('Sorry, I encountered an error looking up messages.');
+    }
+  }
+};

@@ -65,6 +65,18 @@ class TwitchEventManager extends EventEmitter {
         throw new Error('Bot username not configured');
       }
 
+      // Add reconnection handling
+      this.eventSubListener.onConnectionError((error) => {
+        logger.error('EventSub connection error:', error);
+        // Attempt reconnection after delay
+        setTimeout(() => this.setupEventSub(), 5000);
+      });
+
+      // Add connection state logging
+      this.eventSubListener.onConnect(() => {
+        logger.info('EventSub connected successfully');
+      });
+
       for (const channel of this.channels) {
         try {
           const user = await this.apiClient.users.getUserByName(channel);
@@ -195,13 +207,15 @@ class TwitchEventManager extends EventEmitter {
       try {
         logger.debug(`Received message: ${message}`);
         
-        if (message.startsWith(config.twitch.commandPrefix)) {
+        const commandPrefix = config.twitch.commandPrefix || '#';
+        if (message.startsWith(commandPrefix)) {
           logger.debug(`Detected command message: ${message}`);
-          const args = message.slice(config.twitch.commandPrefix.length).trim().split(/\s+/);
+          const args = message.slice(commandPrefix.length).trim().split(/\s+/);
           const commandName = args.shift().toLowerCase();
           
           logger.debug(`Parsed command: ${commandName}, args: ${args.join(', ')}`);
           
+          // Emit command event with all necessary data
           this.emit('command', {
             channel: channel.replace('#', ''),
             user: {
@@ -217,7 +231,7 @@ class TwitchEventManager extends EventEmitter {
             apiClient: this.apiClient,
             say: async (text) => {
               if (this.messageLogger) {
-                await this.messageLogger.logUserMessage(channel.replace('#', ''), user, text);
+                await this.messageLogger.logBotMessage(channel.replace('#', ''), text);
               }
               await this.chatClient.say(channel, text);
             }
@@ -370,9 +384,25 @@ class TwitchEventManager extends EventEmitter {
 
   async analyzeStream(channel, stream) {
     try {
+      // Add rate limiting
+      const RATE_LIMIT = 5; // requests per minute
+      const now = Date.now();
+      
+      // Store last analysis times in Map
+      if (!this.analysisRateLimit) {
+        this.analysisRateLimit = new Map();
+      }
+
+      const recentAnalyses = Array.from(this.analysisRateLimit.values())
+        .filter(time => now - time < 60000);
+
+      if (recentAnalyses.length >= RATE_LIMIT) {
+        logger.debug(`Rate limit reached for stream analysis`);
+        return;
+      }
+
       // Add a cooldown check
       const lastAnalysis = this.lastStreamAnalysis.get(channel);
-      const now = Date.now();
       const ANALYSIS_COOLDOWN = 10 * 60 * 1000; // 10 minutes
 
       if (lastAnalysis && now - lastAnalysis < ANALYSIS_COOLDOWN) {
@@ -432,6 +462,16 @@ class TwitchEventManager extends EventEmitter {
         
         logger.info(`Sent stream analysis comment in ${channel}: ${comment}`);
       }
+
+      // Update rate limit tracking
+      this.analysisRateLimit.set(channel, now);
+
+      // Cleanup old entries
+      for (const [ch, time] of this.analysisRateLimit.entries()) {
+        if (now - time > 60000) {
+          this.analysisRateLimit.delete(ch);
+        }
+      }
     } catch (error) {
       logger.error(`Error analyzing stream for ${channel}:`, error);
     }
@@ -479,19 +519,43 @@ class TwitchEventManager extends EventEmitter {
   // Add method to cleanup resources
   async cleanup() {
     try {
-      // Stop EventSub listener
-      if (this.eventSubListener) {
-        await this.eventSubListener.stop();
-      }
+      // Add timeout for cleanup
+      const CLEANUP_TIMEOUT = 5000;
       
-      // Clear any existing timers or monitors
+      const cleanupPromise = Promise.race([
+        Promise.all([
+          // Stop EventSub listener
+          this.eventSubListener?.stop(),
+          // Disconnect chat client
+          this.chatClient?.quit(),
+          // Clear timers
+          this.clearAllTimers()
+        ]),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Cleanup timeout')), CLEANUP_TIMEOUT)
+        )
+      ]);
+
+      await cleanupPromise;
+      
+      // Clear maps
       this.streamMonitors.clear();
       this.lastStreamAnalysis.clear();
+      this.channels.clear();
       
       logger.info('TwitchEventManager cleanup completed');
     } catch (error) {
       logger.error('Error during TwitchEventManager cleanup:', error);
+      // Force cleanup on timeout
+      this.forceCleanup();
     }
+  }
+
+  forceCleanup() {
+    this.streamMonitors.clear();
+    this.lastStreamAnalysis.clear();
+    this.channels.clear();
+    logger.warn('Forced TwitchEventManager cleanup completed');
   }
 
   // Add these utility methods

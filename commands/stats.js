@@ -127,13 +127,14 @@ class Stats {
   }
 }
 
-export async function setupStats(bot) {
-  logger.startOperation('Setting up Stats command');
-  const stats = new Stats(bot);
-  logger.endOperation('Setting up Stats command', true);
-  return {
-    stats: async (context) => await stats.handleStatsCommand(context),
-    ping: async (context) => await stats.handlePingCommand(context),
-    uptime: async (context) => await stats.handleUptimeCommand(context),
-  };
-}
+export default {
+  async execute({ channel, user, args, say }) {
+    try {
+      const response = await handleStats(channel, user, args);
+      await say(response);
+    } catch (error) {
+      logger.error('Error executing stats command:', error);
+      await say('Sorry, I encountered an error fetching stats.');
+    }
+  }
+};

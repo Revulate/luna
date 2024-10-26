@@ -428,3 +428,16 @@ export async function setupAfk(chatClient) {
     throw error;
   }
 }
+
+export default {
+  async execute({ channel, user, args, say }) {
+    try {
+      const afkHandler = new AFK();
+      await afkHandler.initialize(); // Add initialization
+      await afkHandler.handleAfkCommand({ channel, user, args, say });
+    } catch (error) {
+      logger.error('Error executing AFK command:', error);
+      await say('Sorry, I encountered an error processing your request.');
+    }
+  }
+};

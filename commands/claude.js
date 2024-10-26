@@ -650,3 +650,25 @@ export function setupClaude(chatClient, twitchEventManager) {
     handler
   };
 }
+
+export default {
+  async execute({ channel, user, args, say }) {
+    try {
+      const handler = new ClaudeHandler();
+      const input = args.join(' ');
+      
+      if (!input) {
+        const response = `@${user.username}, Please provide a message after the #claude command.`;
+        await say(response);
+        return;
+      }
+
+      const response = await handler.generateResponse(input);
+      const formattedResponse = `@${user.username} ${response}`;
+      await say(formattedResponse);
+    } catch (error) {
+      logger.error('Error executing Claude command:', error);
+      await say('Sorry, I encountered an error processing your request.');
+    }
+  }
+};

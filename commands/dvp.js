@@ -20,13 +20,19 @@ import { authenticate } from '@google-cloud/local-auth';
 import fs from 'fs';
 import { MessageLogger } from '../utils/MessageLogger.js';
 import { serviceRegistry } from '../utils/serviceRegistry.js';
+import FuzzySearcher from '../utils/fuzzySearch.js';
 
 dotenv.config();
 
-// Move the class closing brace up before the export
+// Update the constructor and initialization
 class DVP {
+  static instance = null;
+
   constructor() {
-    logger.startOperation('Initializing DVP');
+    if (DVP.instance) {
+      return DVP.instance;
+    }
+
     this.initialized = false;
     this.dbPath = path.join(process.cwd(), 'databases', 'vulpes_games.db');
     this.channelName = 'vulpeshd';
@@ -34,107 +40,217 @@ class DVP {
     this.sheetUrl = config.google?.sheetUrl;
     this.imageUrlCache = new Map();
     this.GAME_IMAGE_REFRESH_INTERVAL = 24 * 60 * 60 * 1000;
+
+    // Initialize abbreviation mapping
+    this.abbreviationMapping = {
+      'reb': 'Rebirth',
+      'mc': 'Minecraft',
+      'wow': 'World of Warcraft',
+      'gta': 'Grand Theft Auto V',
+      'gta5': 'Grand Theft Auto V',
+      'gtav': 'Grand Theft Auto V',
+      'dbd': 'Dead by Daylight',
+      'p5': 'Persona 5',
+      'p5r': 'Persona 5 Royal',
+      'ff7': 'Final Fantasy VII',
+      'ff7r': 'Final Fantasy VII Remake',
+      'botw': 'The Legend of Zelda: Breath of the Wild',
+      'totk': 'The Legend of Zelda: Tears of the Kingdom',
+      'oot': 'The Legend of Zelda: Ocarina of Time',
+      'mm': 'The Legend of Zelda: Majora\'s Mask'
+    };
+
+    // Initialize properties
+    this.db = null;
+    this.preparedStatements = null;
     
-    logger.debug('DVP class initialized with:', {
-      dbPath: this.dbPath,
-      channelName: this.channelName,
-      sheetId: this.sheetId,
-      sheetUrl: this.sheetUrl
+    logger.debug('DVP class initialized');
+    DVP.instance = this;
+
+    this.fuzzySearcher = new FuzzySearcher({
+      abbreviations: this.abbreviationMapping
     });
   }
 
-  async initialize() {
-    if (this.initialized) {
-      logger.debug('DVP already initialized');
-      return;
+  async initialize(forceUpdate = false) {
+    if (this.initialized && !forceUpdate) {
+      logger.debug('DVP already initialized, skipping');
+      return this;
     }
 
     try {
-      // Initialize database
-      this.db = new Database(this.dbPath);
-      await this._setupDatabase();
-      this._prepareStatements();
+      // Initialize database only if not already initialized
+      if (!this.db || forceUpdate) {
+        this.db = new Database(this.dbPath);
+        await this._setupDatabase();
+        this._prepareStatements();
 
-      // Initialize Twitch API client
-      const authProvider = new AppTokenAuthProvider(config.twitch.clientId, config.twitch.clientSecret);
-      this.apiClient = new ApiClient({ authProvider });
-      
-      // Get TwitchEventManager from service registry - Fix the incorrect access
-      this.twitchEventManager = serviceRegistry.getService('twitchEventManager');
-      if (!this.twitchEventManager) {
-        logger.warn('TwitchEventManager not available, retrying with alternative name...');
-        this.twitchEventManager = serviceRegistry.getService('eventManager');
-      }
-
-      if (!this.twitchEventManager) {
-        logger.warn('TwitchEventManager not available, some features may be limited');
-      } else {
-        logger.debug('Successfully connected to TwitchEventManager');
-      }
-
-      // Initialize Google Sheets
-      try {
-        if (!config.google?.credentials) {
-          logger.warn('Google credentials not configured, skipping Google Sheets initialization');
-        } else {
-          this.auth = await this.authorize();
-          this.sheets = google.sheets({ version: 'v4', auth: this.auth });
+        // Initialize Twitch API client
+        const authProvider = new AppTokenAuthProvider(config.twitch.clientId, config.twitch.clientSecret);
+        this.apiClient = new ApiClient({ authProvider });
+        
+        // Get TwitchEventManager from service registry
+        this.twitchEventManager = serviceRegistry.getService('twitchEventManager')?.manager;
+        if (!this.twitchEventManager) {
+          logger.warn('TwitchEventManager not available, some features may be limited');
         }
-      } catch (error) {
-        logger.warn('Failed to initialize Google Sheets, continuing without it:', error);
+
+        // Only run initializeData if forcing update
+        if (forceUpdate) {
+          await this.initializeData();
+        }
       }
 
-      await this.initializeData();
       this.initialized = true;
       logger.info('DVP module initialized successfully');
+      return this;
     } catch (error) {
       logger.error('Failed to initialize DVP:', error);
       throw error;
     }
   }
 
-  _prepareStatements() {
-    this.preparedStatements = {
-      selectGame: this.db.prepare('SELECT * FROM games WHERE name = ?'),
-      selectAllGames: this.db.prepare('SELECT * FROM games ORDER BY last_played DESC'),
-      selectActiveGames: this.db.prepare('SELECT name, image_url FROM games'),
-      insertGame: this.db.prepare(`
-        INSERT OR REPLACE INTO games (name, time_played, last_played, image_url)
-        VALUES (?, ?, ?, ?)
-      `),
-      updateGameImageUrl: this.db.prepare('UPDATE games SET image_url = ? WHERE name = ?'),
-      getMetadata: this.db.prepare('SELECT value FROM metadata WHERE key = ?'),
-      setMetadata: this.db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)')
-    };
-  }
-
   async _setupDatabase() {
     try {
-      this.db.exec(`
-        CREATE TABLE IF NOT EXISTS games (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          name TEXT NOT NULL UNIQUE,
-          time_played INTEGER NOT NULL,
-          last_played TEXT NOT NULL,
-          image_url TEXT
-        );
+      // Ensure database directory exists
+      const dbDir = path.dirname(this.dbPath);
+      await fs.promises.mkdir(dbDir, { recursive: true });
 
-        CREATE TABLE IF NOT EXISTS metadata (
-          key TEXT PRIMARY KEY,
-          value TEXT,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-      `);
+      // Initialize database with proper options
+      if (!this.db) {
+        this.db = new Database(this.dbPath, {
+          verbose: process.env.LOG_LEVEL === 'debug' ? console.log : null,
+          fileMustExist: false
+        });
 
-      // Verify table creation
-      const tableCheck = this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='games'").get();
-      if (!tableCheck) {
-        throw new Error('Games table was not created successfully');
+        // Enable foreign keys and WAL mode
+        this.db.pragma('foreign_keys = ON');
+        this.db.pragma('journal_mode = WAL');
       }
 
-      logger.info('DVP database tables created successfully');
+      // Create tables
+      if (this.db) {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS games (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            time_played INTEGER NOT NULL,
+            last_played TEXT NOT NULL,
+            image_url TEXT
+          );
+
+          CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        // Prepare statements after database is initialized
+        await this._prepareStatements();
+
+        logger.info('Database setup complete');
+      } else {
+        throw new Error('Database initialization failed');
+      }
     } catch (error) {
       logger.error('Error setting up DVP database:', error);
+      throw error;
+    }
+  }
+
+  async _prepareStatements() {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+
+    try {
+      this.preparedStatements = {
+        // Fix the selectAllGames query to include all fields
+        selectAllGames: this.db.prepare(`
+          SELECT * FROM games 
+          ORDER BY date(last_played) DESC, time_played DESC
+        `),
+        // Add other necessary statements
+        insertGame: this.db.prepare(`
+          INSERT OR REPLACE INTO games (name, time_played, last_played, image_url)
+          VALUES (?, ?, ?, ?)
+        `),
+        updateGameImageUrl: this.db.prepare('UPDATE games SET image_url = ? WHERE name = ?'),
+        getMetadata: this.db.prepare('SELECT value FROM metadata WHERE key = ?'),
+        setMetadata: this.db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)')
+      };
+    } catch (error) {
+      logger.error('Error preparing statements:', error);
+      throw error;
+    }
+  }
+
+  async initializeGoogleSheets() {
+    try {
+      this.sheets = google.sheets({ version: 'v4' });
+      
+      // Read credentials file and use it directly
+      const credentialsPath = path.join(process.cwd(), 'credentials.json');
+      
+      this.auth = new JWT({
+        keyFile: credentialsPath,  // Use the file path instead of raw credentials
+        scopes: [
+          'https://www.googleapis.com/auth/spreadsheets',
+          'https://www.googleapis.com/auth/script.projects'
+        ]
+      });
+
+      await this.auth.authorize();
+      logger.info('Google Sheets authentication successful');
+    } catch (error) {
+      logger.error('Google Sheets authentication failed:', error);
+      // Don't throw error to allow operation without Google Sheets
+      this.googleEnabled = false;
+    }
+  }
+
+  async getSheetId() {
+    try {
+      const response = await this.sheets.spreadsheets.get({
+        auth: this.auth,
+        spreadsheetId: this.sheetId
+      });
+
+      const sheet = response.data.sheets.find(s => 
+        s.properties.title === 'VulpesHD Games'
+      );
+
+      if (!sheet) {
+        return null;
+      }
+
+      return sheet.properties.sheetId;
+    } catch (error) {
+      logger.error(`Error getting sheet ID: ${error}`);
+      return null;
+    }
+  }
+
+  async createInitialSheet() {
+    try {
+      const response = await this.sheets.spreadsheets.batchUpdate({
+        auth: this.auth,
+        spreadsheetId: this.sheetId,
+        resource: {
+          requests: [{
+            addSheet: {
+              properties: {
+                title: 'VulpesHD Games'
+              }
+            }
+          }]
+        }
+      });
+
+      return response.data.replies[0].addSheet.properties.sheetId;
+    } catch (error) {
+      logger.error(`Error creating initial sheet: ${error}`);
       throw error;
     }
   }
@@ -440,95 +556,73 @@ class DVP {
     logger.info('Starting Google Sheet update...');
     try {
       const games = this.preparedStatements.selectAllGames.all();
-      const profilePictureUrl = await this.twitchEventManager.getUserProfilePicture('vulpeshd');
-      
       logger.info(`Retrieved ${games.length} games from the database`);
 
-      // Prepare batch requests for values
-      const batchRequests = {
-        spreadsheetId: this.sheetId,
-        resource: {
-          valueInputOption: 'USER_ENTERED',
-          data: [
-            // Update header with profile picture and stream status
-            {
-              range: 'VulpesHD Games!A1',
-              values: [[`=IMAGE("${profilePictureUrl}", 1)`]]
-            },
-            {
-              range: 'VulpesHD Games!B1',
-              values: [[await this.formatStreamStatus()]]
-            },
-            // Update timestamp
-            {
-              range: 'VulpesHD Games!A2:D2',
-              values: [[
-                `Last Updated: ${format(new Date(), 'MMMM d, yyyy')} at ${format(new Date(), 'h:mm:ss a')} MST (GMT-7)`,
-                '', '', ''
-              ]]
-            },
-            // Update column headers
-            {
-              range: 'VulpesHD Games!A3:D3',
-              values: [['Artwork', 'Game', 'Time Played', 'Last Played']]
-            },
-            // Update game data with corrected date handling
-            {
-              range: `VulpesHD Games!A4:D${games.length + 3}`,
-              values: await Promise.all(games.map(async game => {
-                // Parse the date string and format it correctly
-                const lastPlayedDate = parse(game.last_played, 'yyyy-MM-dd', new Date());
-                const formattedDate = format(lastPlayedDate, 'MMMM do, yyyy');
-                
-                return [
-                  game.image_url ? `=IMAGE("${game.image_url}", 4, 190, 142)` : '',
-                  game.name,
-                  this.formatPlaytime(game.time_played),
-                  formattedDate
-                ];
-              }))
+      // Format requests for better styling
+      const requests = [{
+        updateSheetProperties: {
+          properties: {
+            gridProperties: {
+              frozenRowCount: 1
             }
-          ]
+          },
+          fields: 'gridProperties.frozenRowCount'
         }
-      };
+      }];
 
-      // Execute batch update for values
-      await this.sheets.spreadsheets.values.batchUpdate({
-        auth: this.auth,
-        spreadsheetId: this.sheetId,
-        requestBody: batchRequests.resource
+      // Set column widths
+      requests.push({
+        updateDimensionProperties: {
+          range: {
+            sheetId: 0,
+            dimension: 'COLUMNS',
+            startIndex: 0,
+            endIndex: 4
+          },
+          properties: {
+            pixelSize: 190
+          },
+          fields: 'pixelSize'
+        }
       });
 
-      // Get and apply the formatting
-      const formatRequests = await this.getFormatRequests();
-      await this.sheets.spreadsheets.batchUpdate({
-        auth: this.auth,
-        spreadsheetId: this.sheetId,
-        requestBody: formatRequests
-      });
+      // Update values with formatting
+      const valueRanges = [{
+        range: 'VulpesHD Games!A1:D1',
+        values: [['Artwork', 'Game', 'Time Played', 'Last Played']]
+      }, {
+        range: `VulpesHD Games!A2:D${games.length + 1}`,
+        values: games.map(game => {
+          const lastPlayedDate = parse(game.last_played, 'yyyy-MM-dd', new Date());
+          const formattedDate = format(lastPlayedDate, 'MMMM do, yyyy');
+          
+          return [
+            game.image_url ? `=IMAGE("${game.image_url}", 4, 190, 142)` : '',
+            game.name,
+            this.formatPlaytime(game.time_played),
+            formattedDate
+          ];
+        })
+      }];
+
+      // Execute batch updates
+      await Promise.all([
+        this.sheets.spreadsheets.batchUpdate({
+          spreadsheetId: this.sheetId,
+          requestBody: { requests }
+        }),
+        this.sheets.spreadsheets.values.batchUpdate({
+          spreadsheetId: this.sheetId,
+          requestBody: {
+            valueInputOption: 'USER_ENTERED',
+            data: valueRanges
+          }
+        })
+      ]);
 
       logger.info('Google Sheet updated successfully');
     } catch (error) {
       logger.error(`Error updating Google Sheet: ${error}`);
-      throw error;
-    }
-  }
-
-  async getSheetId() {
-    try {
-      const response = await this.sheets.spreadsheets.get({
-        auth: this.auth,
-        spreadsheetId: this.sheetId,
-        fields: 'sheets.properties(sheetId,title)' // Request only needed fields
-      });
-
-      const sheet = response.data.sheets.find(s => s.properties.title === 'VulpesHD Games');
-      if (!sheet) {
-        throw new Error('Sheet "VulpesHD Games" not found');
-      }
-      return sheet.properties.sheetId;
-    } catch (error) {
-      logger.error(`Error retrieving sheet ID: ${error}`);
       throw error;
     }
   }
@@ -561,146 +655,139 @@ class DVP {
     }
   }
 
-  // Update fetchMissingImages method
-  async fetchMissingImages() {
-    if (!this.apiClient) {
-      logger.debug('Skipping image fetch - API client not available');
-      return false;
-    }
-    
-    try {
-      // Your existing fetchMissingImages code
-      return true;
-    } catch (error) {
-      logger.warn('Error fetching missing images:', error);
-      return false;
-    }
-  }
-
+  // Update the handleDvpCommand method's error handling
   async handleDvpCommand(context) {
-    const { channel, user, args } = context;
-    logger.startOperation(`Processing DVP command from ${user.username}`);
-
     try {
-      // Command implementation
-      logger.debug('DVP command args:', args);
-
+      const { channel, user, args } = context;
       if (!this.initialized) {
-        const errorResponse = `@${user.username}, DVP module not initialized`;
-        await MessageLogger.logBotMessage(channel, errorResponse);
-        await context.say(errorResponse);
+        await this.initialize();
+      }
+
+      const messageLogger = serviceRegistry.getService('messageLogger');
+      if (!messageLogger) {
+        logger.error('MessageLogger service not available');
+        throw new Error('MessageLogger service not available');
+      }
+
+      // No arguments - show help
+      if (!args.length) {
+        const helpMsg = `@${user.username}, Available commands: #dvp [game] • [list] • [stats]`;
+        await messageLogger.logUserMessage(channel, 'BOT', helpMsg);
+        await context.say(helpMsg);
         return;
       }
 
-      let gameName = args.join(' ').trim();
-      if (!gameName) {
-        const usageResponse = `@${user.username}, please provide a game name.`;
-        await MessageLogger.logBotMessage(channel, usageResponse);
-        await context.say(usageResponse);
-        return;
+      const subCommand = args[0].toLowerCase();
+
+      // Handle list and stats commands first
+      switch (subCommand) {
+        case 'list':
+          await this.handleListCommand(user.username, context.say, channel, messageLogger);
+          return;
+        case 'stats':
+          await this.handleStatsCommand(user.username, context.say, channel, messageLogger);
+          return;
       }
 
+      // If not a special command, treat as game lookup
+      const gameName = args.join(' ');
       try {
-        // Get all games from database for fuzzy matching
-        const allGames = this.preparedStatements.selectAllGames.all();
+        const gameInfo = await this.findGameByName(gameName);
         
-        // Try exact match first
-        let result = this.preparedStatements.selectGame.get(gameName);
-
-        // If no exact match found, try fuzzy matching
-        if (!result) {
-          const matches = fuzzball.extract(gameName, allGames.map(g => g.name), {
-            scorer: fuzzball.partial_ratio,
-            limit: 3,
-            cutoff: 65
-          });
-
-          if (matches.length > 0) {
-            const [bestMatchName, score] = matches[0];
-            
-            if (score >= 65) {
-              result = allGames.find(g => g.name === bestMatchName);
-              gameName = bestMatchName;
-            } else if (matches.length > 1) {
-              const suggestions = matches
-                .map(([name]) => name)
-                .join(', ');
-              const suggestionResponse = `@${user.username}, couldn't find an exact match. Did you mean one of these: ${suggestions}?`;
-              await MessageLogger.logBotMessage(channel, suggestionResponse);
-              await context.say(suggestionResponse);
-              return;
-            }
-          }
-        }
-
-        if (result) {
-          const { time_played, last_played } = result;
+        if (gameInfo) {
+          const { time_played, last_played } = gameInfo;
           const formattedTime = this.formatPlaytime(time_played);
           const lastPlayedDate = parse(last_played, 'yyyy-MM-dd', new Date());
           const lastPlayedFormatted = format(lastPlayedDate, 'MMMM do, yyyy');
 
-          const response = `@${user.username}, Vulpes last played ${gameName} on ${lastPlayedFormatted} • Total playtime: ${formattedTime}.`;
-          await MessageLogger.logBotMessage(channel, response);
+          const response = `@${user.username}, Vulpes last played ${gameInfo.name} on ${lastPlayedFormatted} • Total playtime: ${formattedTime}`;
+          await messageLogger.logUserMessage(channel, 'BOT', response);
           await context.say(response);
         } else {
-          const notFoundResponse = `@${user.username}, couldn't find any games matching "${gameName}".`;
-          await MessageLogger.logBotMessage(channel, notFoundResponse);
-          await context.say(notFoundResponse);
+          const response = `@${user.username}, I couldn't find that game in the database.`;
+          await messageLogger.logUserMessage(channel, 'BOT', response);
+          await context.say(response);
         }
       } catch (error) {
-        logger.error(`Error executing dvp command: ${error}`);
-        const errorResponse = `@${user.username}, an error occurred while processing your request.`;
-        await MessageLogger.logBotMessage(channel, errorResponse);
-        await context.say(errorResponse);
-      }
+        // Check if this is a suggestion error
+        if (error.message.includes('Did you mean')) {
+          const response = `@${user.username}, ${error.message}`;
+          await messageLogger.logUserMessage(channel, 'BOT', response);
+          await context.say(response);
+          return;
+        }
 
-      logger.endOperation(`Processing DVP command from ${user.username}`, true);
+        // Handle other errors
+        logger.error('Error executing dvp command:', error);
+        const response = `@${user.username}, Sorry, I encountered an error while looking up that game.`;
+        await messageLogger.logUserMessage(channel, 'BOT', response);
+        await context.say(response);
+      }
     } catch (error) {
-      logger.error('Error in DVP command:', error);
-      const errorResponse = `@${user.username}, Sorry, an error occurred.`;
-      await MessageLogger.logBotMessage(channel, errorResponse);
-      await context.say(errorResponse);
-      logger.endOperation(`Processing DVP command from ${user.username}`, false);
+      logger.error('Error executing DVP command:', error);
+      if (context.say) {
+        await context.say(`@${context.user.username}, Sorry, I encountered an error processing your request.`);
+      }
     }
   }
 
-  async handleDvpUpdateCommand(context) {
-    const { channel, user } = context;
-    
+  // Update the dvpupdate command handler
+  async handleDvpUpdateCommand({ channel, user, say }) {
     if (user.username.toLowerCase() !== 'revulate') {
       const unauthorizedResponse = `@${user.username}, sorry, only Revulate can use this command.`;
       await MessageLogger.logBotMessage(channel, unauthorizedResponse);
-      await context.say(unauthorizedResponse);
+      await say(unauthorizedResponse);
       return;
     }
 
-    logger.info(`Force update initiated by ${user.username}`);
-    const initResponse = `@${user.username}, initiating force update. This may take a moment...`;
-    await MessageLogger.logBotMessage(channel, initResponse);
-    await context.say(initResponse);
-
     try {
-      logger.info('Starting web scraping update');
-      await this.scrapeInitialData();
-      
-      logger.info('Fetching missing game images');
+      logger.info('Starting force update...');
+      // Force reinitialization with data update
+      await this.initialize(true);
       await this.fetchMissingImages();
-      
-      logger.info('Updating Google Sheet');
       await this.updateGoogleSheet();
-      
-      logger.info('Saving last scrape time');
       await this.saveLastScrapeTime();
 
       const successResponse = `@${user.username}, force update completed successfully!`;
       await MessageLogger.logBotMessage(channel, successResponse);
-      await context.say(successResponse);
-      logger.info('Force update completed successfully');
+      await say(successResponse);
     } catch (error) {
       logger.error(`Error during force update: ${error}`);
       const errorResponse = `@${user.username}, an error occurred during the force update.`;
       await MessageLogger.logBotMessage(channel, errorResponse);
-      await context.say(errorResponse);
+      await say(errorResponse);
+    }
+  }
+
+  // Update the command handlers to use logUserMessage
+  async handleListCommand(username, say, channel, messageLogger) {
+    try {
+      const games = this.preparedStatements.selectAllGames.all();
+      const recentGames = games.slice(0, 5)
+        .map(game => `${game.name} (${this.formatPlaytime(game.time_played)})`)
+        .join(', ');
+
+      const response = `@${username}, Recent games: ${recentGames}`;
+      await messageLogger.logUserMessage(channel, 'BOT', response);
+      await say(response);
+    } catch (error) {
+      logger.error('Error in list command:', error);
+      throw error;
+    }
+  }
+
+  async handleStatsCommand(username, say, channel, messageLogger) {
+    try {
+      const games = this.preparedStatements.selectAllGames.all();
+      const totalGames = games.length;
+      const totalTime = games.reduce((sum, game) => sum + game.time_played, 0);
+      
+      const response = `@${username}, Total games: ${totalGames}, Total playtime: ${this.formatPlaytime(totalTime)}`;
+      await messageLogger.logUserMessage(channel, 'BOT', response);
+      await say(response);
+    } catch (error) {
+      logger.error('Error in stats command:', error);
+      throw error;
     }
   }
 
@@ -942,31 +1029,21 @@ class DVP {
     }
   }
 
-  async getGameInfo(gameName) {
-    // Check if the gameName is an abbreviation and map it to the full name
-    const fullGameName = this.abbreviationMapping[gameName.toLowerCase()] || gameName;
-    const cacheKey = `game:${fullGameName}`;
-    let gameInfo = this.cache.get(cacheKey);
-    if (gameInfo) {
-        return gameInfo;
+  async findGameByName(gameName) {
+    try {
+      const allGames = this.preparedStatements.selectAllGames.all();
+      const { match, suggestions } = await this.fuzzySearcher.findMatch(gameName, allGames);
+      
+      if (match) return match;
+      if (suggestions.length > 0) {
+        throw new Error(`Did you mean one of these: ${suggestions.join(' • ')}?`);
+      }
+      return null;
+    } catch (error) {
+      if (error.message.includes('Did you mean')) throw error;
+      logger.error('Error finding game:', error);
+      throw error;
     }
-
-    // Use fuzzy searching to find the closest match in the database
-    const allGames = this.preparedStatements.selectAllGames.all();
-    const matches = fuzzball.extract(fullGameName, allGames.map(game => game.name), { scorer: fuzzball.partial_ratio });
-
-    if (matches.length > 0 && matches[0][1] > 50) { // Adjust the threshold as needed
-        const bestMatch = matches[0][0];
-        gameInfo = this.fetchGameInfoFromDatabase(bestMatch);
-        this.cache.set(cacheKey, gameInfo);
-        return gameInfo;
-    }
-
-    return null;
-  }
-
-  async fetchGameInfoFromDatabase(gameName) {
-    return this.preparedStatements.selectGame.get(gameName);
   }
 
   async cleanup() {
@@ -1378,7 +1455,7 @@ class DVP {
 
   async findGameIdByName(gameName) {
     logger.info(`Searching for game by name: ${gameName}`);
-    const normalizedGameName = this._normalizeGameName(gameName);
+    const normalizedGameName = this.fuzzySearcher.normalizeGameName(gameName);
     const lowerGameName = normalizedGameName.toLowerCase();
     
     // Check if input is too short or vague
@@ -1499,15 +1576,6 @@ class DVP {
     }
   }
 
-  // Helper method to normalize game names
-  _normalizeGameName(name) {
-    return name
-        .toLowerCase()
-        .replace(/[!?:]/g, '') // Remove special characters
-        .replace(/\s+/g, ' ')  // Normalize spaces
-        .trim();
-  }
-
   // Add this method to handle last scrape time
   async saveLastScrapeTime() {
     try {
@@ -1526,42 +1594,67 @@ class DVP {
       const games = this.preparedStatements.selectAllGames.all();
       logger.info(`Retrieved ${games.length} games from the database`);
 
-      // Prepare batch requests for values
-      const batchRequests = {
-        spreadsheetId: this.sheetId,
-        resource: {
-          valueInputOption: 'USER_ENTERED',
-          data: [
-            // Update header
-            {
-              range: 'VulpesHD Games!A1:D1',
-              values: [['Artwork', 'Game', 'Time Played', 'Last Played']]
-            },
-            // Update game data
-            {
-              range: `VulpesHD Games!A2:D${games.length + 1}`,
-              values: games.map(game => {
-                const lastPlayedDate = parse(game.last_played, 'yyyy-MM-dd', new Date());
-                const formattedDate = format(lastPlayedDate, 'MMMM do, yyyy');
-                
-                return [
-                  game.image_url ? `=IMAGE("${game.image_url}", 4, 190, 142)` : '',
-                  game.name,
-                  this.formatPlaytime(game.time_played),
-                  formattedDate
-                ];
-              })
+      // Format requests for better styling
+      const requests = [{
+        updateSheetProperties: {
+          properties: {
+            gridProperties: {
+              frozenRowCount: 1
             }
-          ]
+          },
+          fields: 'gridProperties.frozenRowCount'
         }
-      };
+      }];
 
-      // Execute batch update
-      await this.sheets.spreadsheets.values.batchUpdate({
-        auth: this.auth,
-        spreadsheetId: this.sheetId,
-        requestBody: batchRequests.resource
+      // Set column widths
+      requests.push({
+        updateDimensionProperties: {
+          range: {
+            sheetId: 0,
+            dimension: 'COLUMNS',
+            startColumnIndex: 0,
+            endColumnIndex: 4
+          },
+          properties: {
+            pixelSize: 190
+          },
+          fields: 'pixelSize'
+        }
       });
+
+      // Update values with formatting
+      const valueRanges = [{
+        range: 'VulpesHD Games!A1:D1',
+        values: [['Artwork', 'Game', 'Time Played', 'Last Played']]
+      }, {
+        range: `VulpesHD Games!A2:D${games.length + 1}`,
+        values: games.map(game => {
+          const lastPlayedDate = parse(game.last_played, 'yyyy-MM-dd', new Date());
+          const formattedDate = format(lastPlayedDate, 'MMMM do, yyyy');
+          
+          return [
+            game.image_url ? `=IMAGE("${game.image_url}", 4, 190, 142)` : '',
+            game.name,
+            this.formatPlaytime(game.time_played),
+            formattedDate
+          ];
+        })
+      }];
+
+      // Execute batch updates
+      await Promise.all([
+        this.sheets.spreadsheets.batchUpdate({
+          spreadsheetId: this.sheetId,
+          requestBody: { requests }
+        }),
+        this.sheets.spreadsheets.values.batchUpdate({
+          spreadsheetId: this.sheetId,
+          requestBody: {
+            valueInputOption: 'USER_ENTERED',
+            data: valueRanges
+          }
+        })
+      ]);
 
       logger.info('Google Sheet updated successfully');
     } catch (error) {
@@ -1652,25 +1745,109 @@ class DVP {
       throw error;
     }
   }
+
+  // Update execute method
+  async execute(context) {
+    try {
+      logger.debug('Executing DVP command via default export');
+      
+      // Get or create DVP instance
+      const dvp = DVP.instance || new DVP();
+      
+      // Initialize only if needed, without forcing update
+      if (!dvp.initialized) {
+        await dvp.initialize(false);
+      }
+      
+      // Execute command
+      await dvp.handleDvpCommand(context);
+    } catch (error) {
+      logger.error('Error executing DVP command:', error);
+      if (context.say) {
+        await context.say(`@${context.user.username}, Sorry, I encountered an error processing your request.`);
+      }
+    }
+  }
 } // <-- Class definition ends here
 
 // Export both the class and the setup function
 export { DVP };
+
+// Update setupDvp to use the new static setup method
 export async function setupDvp(context) {
-  logger.startOperation('Setting up DVP command');
   try {
-    const dvp = new DVP();
-    await dvp.initialize();
+    logger.debug('Setting up DVP commands');
     
-    logger.endOperation('Setting up DVP command', true);
+    // Get or create DVP instance
+    const dvp = DVP.instance || new DVP();
+    
+    // Initialize without forcing update
+    if (!dvp.initialized) {
+      await dvp.initialize(false);
+    }
+    
     return {
-      'dvp': (cmdContext) => dvp.handleDvpCommand(cmdContext),
-      'dvpupdate': (cmdContext) => dvp.handleDvpUpdateCommand(cmdContext),
-      'sheet': (cmdContext) => dvp.handleSheetCommand(cmdContext)
+      'dvp': async (cmdContext) => {
+        try {
+          await dvp.handleDvpCommand(cmdContext);
+        } catch (error) {
+          logger.error('Error in DVP command:', error);
+          if (cmdContext.say) {
+            await cmdContext.say(`@${cmdContext.user.username}, Sorry, I encountered an error processing your request.`);
+          }
+        }
+      },
+      'dvpupdate': async (cmdContext) => {
+        try {
+          // Check if user is authorized
+          if (cmdContext.user.username.toLowerCase() !== 'revulate') {
+            await cmdContext.say(`@${cmdContext.user.username}, Only Revulate can use this command.`);
+            return;
+          }
+          
+          logger.info('Starting force update...');
+          // Force reinitialization with data update
+          await dvp.initialize(true);
+          await dvp.fetchMissingImages();
+          await dvp.updateGoogleSheet();
+          await dvp.saveLastScrapeTime();
+
+          await cmdContext.say(`@${cmdContext.user.username}, Force update completed successfully!`);
+        } catch (error) {
+          logger.error('Error in DVPUpdate command:', error);
+          if (cmdContext.say) {
+            await cmdContext.say(`@${cmdContext.user.username}, Sorry, I encountered an error during the update.`);
+          }
+        }
+      }
     };
   } catch (error) {
-    logger.error(`Failed to setup DVP command: ${error}`);
-    logger.endOperation('Setting up DVP command', false);
-    throw error;
+    logger.error('Failed to setup DVP module:', error);
+    return {};
   }
 }
+
+// Update default export
+export default {
+  async execute(context) {
+    try {
+      logger.debug('Executing DVP command via default export');
+      
+      // Get or create DVP instance
+      const dvp = DVP.instance || new DVP();
+      
+      // Initialize only if needed, without forcing update
+      if (!dvp.initialized) {
+        await dvp.initialize(false);
+      }
+      
+      // Execute command
+      await dvp.handleDvpCommand(context);
+    } catch (error) {
+      logger.error('Error executing DVP command:', error);
+      if (context.say) {
+        await context.say(`@${context.user.username}, Sorry, I encountered an error processing your request.`);
+      }
+    }
+  }
+};

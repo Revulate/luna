@@ -1353,59 +1353,20 @@ async function getVideoTranscript(videoId) {
   return "Transcript unavailable"; // Simplified version
 }
 
-export function setupGpt(chatClient) {
-  logger.startOperation('Setting up GPT command');
-  const handler = new GptHandler(chatClient);
-  
-  logger.info('GPT handler setup complete');
-  logger.endOperation('Setting up GPT command', true);
-  
-  return {
-    gpt: async (context) => {
-      try {
-        const { channel, user, args } = context;
-        if (!args || args.length === 0) {
-          const response = `@${user.username}, please provide a message after the #gpt command.`;
-          await MessageLogger.logBotMessage(channel, response);
-          await context.say(response);
-          return;
-        }
+// Create an instance
+const gptHandler = new GptHandler();
 
-        await handler.handleGptCommand(context);
-      } catch (error) {
-        logger.error('Error in GPT command:', error);
-        const errorResponse = `@${context.user.username}, Sorry, an error occurred.`;
-        await MessageLogger.logBotMessage(context.channel, errorResponse);
-        await context.say(errorResponse);
-      }
-    },
-    ask: async (context) => {
-      return await exports.setupGpt(chatClient).gpt(context);
-    },
-    analyze: async (context) => {
-      try {
-        const { channel, user, args } = context;
-        if (!args || args.length === 0) {
-          const response = `@${user.username}, please provide content to analyze.`;
-          await MessageLogger.logBotMessage(channel, response);
-          await context.say(response);
-          return;
-        }
-
-        const content = args.join(' ');
-        const analysis = await handler.analyzeContentInMessage(content);
-        if (analysis) {
-          const response = `@${user.username} ${analysis}`;
-          await MessageLogger.logBotMessage(channel, response);
-          await context.say(response);
-        }
-      } catch (error) {
-        logger.error('Error in analyze command:', error);
-        const errorResponse = `@${context.user.username}, Sorry, an error occurred.`;
-        await MessageLogger.logBotMessage(context.channel, errorResponse);
-        await context.say(errorResponse);
-      }
+// Export the command interface
+export default {
+  async execute({ channel, user, args, say }) {
+    try {
+      const input = args.join(' ');
+      const response = await gptHandler.handleCommand(channel, user, input);
+      await say(response);
+    } catch (error) {
+      logger.error('Error executing GPT command:', error);
+      await say('Sorry, I encountered an error processing your request.');
     }
-  };
-}
+  }
+};
 

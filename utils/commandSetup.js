@@ -1,15 +1,6 @@
 import { ChatClient } from '@twurple/chat';
 import { MessageLogger } from './MessageLogger.js';
 import logger from './logger.js';
-import { setupRate } from '../commands/rate.js';
-import { setupPreview } from '../commands/preview.js';
-import { setupAfk } from '../commands/afk.js';
-import { setupGpt } from '../commands/gpt.js';
-import { setup7tv } from '../commands/7tv.js';
-import { setupMessageLookup } from '../commands/messageLookup.js';
-import { setupSteam } from '../commands/steam.js';
-import { setupDvp } from '../commands/dvp.js';
-import { setupStats } from '../commands/stats.js';
 import path from 'path';
 import fs from 'fs/promises';
 import { fileURLToPath } from 'url';
@@ -23,35 +14,46 @@ class CommandManager {
   constructor() {
     this.commands = new Map();
     this.initialized = false;
+    serviceRegistry.register('commands', this);
   }
 
-  async initialize({ chatClient, apiClient, twitchEventManager }) {
-    if (this.initialized) {
-      return this;
-    }
+  async initialize({ chatClient, apiClient, messageLogger, eventManager }) {
+    if (this.initialized) return this;
 
     try {
-      logger.startOperation('Initializing CommandManager');
-      
-      // Store required services
+      logger.info('Initializing CommandManager');
       this.chatClient = chatClient;
       this.apiClient = apiClient;
-      this.twitchEventManager = twitchEventManager;
+      this.messageLogger = messageLogger;
+      this.eventManager = eventManager;
 
-      if (!this.chatClient || !this.apiClient) {
-        throw new Error('Required services not found: chatClient or apiClient');
+      // Load commands dynamically from the commands directory
+      const commandsDir = path.join(__dirname, '..', 'commands');
+      const commandFiles = await fs.readdir(commandsDir);
+      
+      for (const file of commandFiles) {
+        if (file.endsWith('.js')) {
+          const commandName = path.basename(file, '.js');
+          try {
+            const commandModule = await import(`../commands/${file}`);
+            await this.registerCommand(commandName, commandModule);
+          } catch (error) {
+            logger.error(`Failed to load command ${commandName}:`, error);
+          }
+        }
       }
 
-      // Create context with services
-      const context = {
-        chatClient: this.chatClient,
-        apiClient: this.apiClient,
-        messageLogger: serviceRegistry.getService('messageLogger'),
-        twitchEventManager: this.twitchEventManager
-      };
-
-      // Setup commands with context
-      await this.setupCommands(context);
+      // Listen for command events from TwitchEventManager
+      this.eventManager.on('command', async (data) => {
+        const command = this.commands.get(data.commandName);
+        if (command) {
+          try {
+            await command.execute(data);
+          } catch (error) {
+            logger.error(`Error executing command ${data.commandName}:`, error);
+          }
+        }
+      });
 
       this.initialized = true;
       logger.info('CommandManager initialized successfully');
@@ -62,49 +64,16 @@ class CommandManager {
     }
   }
 
-  async setupCommands(context) {
-    const commandSetups = [
-      { name: 'steam', setup: setupSteam },
-      { name: 'dvp', setup: setupDvp },
-      { name: 'stats', setup: setupStats },
-      // ... other commands
-    ];
-
-    for (const { name, setup } of commandSetups) {
-      try {
-        logger.debug(`Setting up command: ${name}`);
-        const command = await setup(context);
-        if (command) {
-          this.commands.set(name, command);
-          logger.info(`Loaded command: ${name}`);
-        }
-      } catch (error) {
-        logger.error(`Failed to load command ${name}:`, error);
-      }
-    }
-  }
-
-  getCommand(name) {
-    return this.commands.get(name);
-  }
-
-  async handleCommand(commandName, context, ...args) {
-    logger.startOperation(`Executing command: ${commandName}`);
+  async registerCommand(name, module) {
     try {
-      const command = this.getCommand(commandName.toLowerCase());
-      if (!command) {
-        logger.debug(`Command not found: ${commandName}`);
-        logger.endOperation(`Executing command: ${commandName}`, false);
-        return false;
+      if (module.default) {
+        this.commands.set(name, module.default);
+        logger.info(`Registered command: ${name}`);
+      } else {
+        logger.warn(`Command module ${name} has no default export`);
       }
-
-      await command.execute(context, ...args);
-      logger.endOperation(`Executing command: ${commandName}`, true);
-      return true;
     } catch (error) {
-      logger.error(`Error executing command ${commandName}:`, error);
-      logger.endOperation(`Executing command: ${commandName}`, false);
-      return false;
+      logger.error(`Error registering command ${name}:`, error);
     }
   }
 }
@@ -112,17 +81,70 @@ class CommandManager {
 // Create singleton instance
 const commandManager = new CommandManager();
 
-// Register with service registry
-serviceRegistry.register('commands', commandManager);
-
-// Export both the class and singleton instance
 export { CommandManager, commandManager };
 
-// Export setup function for backward compatibility
 export async function setupCommands(chatClient) {
-  await commandManager.initialize();
-  return {
-    commands: commandManager.commands,
-    failedCommands: []
-  };
+  const commands = new Map();
+  
+  try {
+    // Import all command modules
+    const commandModules = {
+      afk: await import('../commands/afk.js'),
+      claude: await import('../commands/claude.js'),
+      dvp: await import('../commands/dvp.js'),
+      gpt: await import('../commands/gpt.js'),
+      messageLookup: await import('../commands/messageLookup.js'),
+      preview: await import('../commands/preview.js'),
+      rate: await import('../commands/rate.js'),
+      sevenTv: await import('../commands/7tv.js'),
+      stats: await import('../commands/stats.js'),
+      steam: await import('../commands/steam.js')
+    };
+
+    // Register each command's execute function
+    for (const [name, module] of Object.entries(commandModules)) {
+      if (module.default?.execute) {
+        commands.set(name, module.default.execute);
+        logger.info(`Registered command: ${name}`);
+      } else {
+        logger.warn(`Command ${name} missing execute function`);
+      }
+    }
+
+    // Handle command messages
+    chatClient.onMessage(async (channel, user, message, msg) => {
+      if (!message.startsWith('#')) return;
+
+      const args = message.slice(1).split(/\s+/);
+      const commandName = args.shift().toLowerCase();
+      const execute = commands.get(commandName);
+
+      if (execute) {
+        try {
+          const context = {
+            channel,
+            user: {
+              id: msg.userInfo.userId,
+              username: user,
+              displayName: msg.userInfo.displayName
+            },
+            args,
+            say: (text) => chatClient.say(channel, text),
+            commandName
+          };
+
+          await execute(context);
+        } catch (error) {
+          logger.error(`Error executing command ${commandName}:`, error);
+          await chatClient.say(channel, 'Sorry, I encountered an error processing your request.');
+        }
+      }
+    });
+
+    logger.info('CommandManager initialized successfully');
+    return commands;
+  } catch (error) {
+    logger.error('Error setting up commands:', error);
+    throw error;
+  }
 }
