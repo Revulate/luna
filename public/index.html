@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TatsLuna Bot Panel</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <!-- Add these scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="/script.js" defer></script>
+</head>
+<body>
+    <div class="container">
+        <header class="panel-header">
+            <h1><i class="fas fa-robot"></i> TatsLuna Bot Panel</h1>
+            <div class="connection-status">
+                <span id="connectionDot"></span>
+                <span id="connectionStatus">Connecting...</span>
+            </div>
+        </header>
+
+        <div class="status-dashboard">
+            <div class="status-card">
+                <div class="card-header">
+                    <i class="fas fa-broadcast-tower"></i>
+                    <h3>Bot Status</h3>
+                </div>
+                <div id="botStatus">Initializing...</div>
+            </div>
+            <div class="status-card">
+                <div class="card-header">
+                    <i class="fas fa-users"></i>
+                    <h3>Active Channels</h3>
+                </div>
+                <div id="channelCount">Loading...</div>
+            </div>
+            <div class="status-card">
+                <div class="card-header">
+                    <i class="fas fa-clock"></i>
+                    <h3>Uptime</h3>
+                </div>
+                <div id="uptime">Calculating...</div>
+            </div>
+            <div class="status-card performance-card">
+                <div class="card-header">
+                    <i class="fas fa-chart-line"></i>
+                    <h3>Performance</h3>
+                </div>
+                <div class="performance-stats">
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <span class="stat-label">Storage</span>
+                            <span class="stat-value" id="storageSize">0 B</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Message Rate</span>
+                            <span class="stat-value" id="messageRate">0/min</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">Memory</span>
+                            <span class="stat-value" id="heapUsage">0 MB</span>
+                        </div>
+                    </div>
+                    <div class="memory-chart-section">
+                        <div class="chart-container">
+                            <canvas id="memoryChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <nav class="tab-navigation">
+            <button class="tab-button active" data-tab="chat">
+                <i class="fas fa-comments"></i> Chat
+            </button>
+            <button class="tab-button" data-tab="logs">
+                <i class="fas fa-list"></i> Logs
+            </button>
+            <button class="tab-button" data-tab="commands">
+                <i class="fas fa-terminal"></i> Commands
+            </button>
+            <button class="tab-button" data-tab="settings">
+                <i class="fas fa-cog"></i> Settings
+            </button>
+        </nav>
+
+        <div class="tab-content active" id="chatTab">
+            <div class="chat-container">
+                <div class="channel-tabs-container">
+                    <div class="channel-tabs"></div>
+                    <button class="new-tab-button" onclick="showJoinChannelDialog()">
+                        <i class="fas fa-plus"></i>
+                    </button>
+                </div>
+                <div class="chat-messages" id="chatBox"></div>
+                <div class="chat-input">
+                    <input type="text" id="messageInput" placeholder="Type a message...">
+                    <button id="sendButton">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-content" id="logsTab">
+            <div class="logs-container">
+                <div class="logs-header">
+                    <select id="logLevel" class="log-level-select">
+                        <option value="all">All Levels</option>
+                        <option value="error">Errors</option>
+                        <option value="warn">Warnings</option>
+                        <option value="info">Info</option>
+                        <option value="debug">Debug</option>
+                        <option value="chat">Chat</option>
+                    </select>
+                    <div class="logs-actions">
+                        <button id="clearLogs" class="clear-button">
+                            <i class="fas fa-trash"></i> Clear
+                        </button>
+                        <button id="exportLogs" class="export-button">
+                            <i class="fas fa-download"></i> Export
+                        </button>
+                    </div>
+                </div>
+                <div class="logs-box" id="logsBox"></div>
+            </div>
+        </div>
+
+        <div class="tab-content" id="commandsTab">
+            <div class="commands-container">
+                <div class="commands-header">
+                    <h3>Available Commands</h3>
+                </div>
+                <div class="commands-list" id="commandsList"></div>
+            </div>
+        </div>
+
+        <div class="tab-content" id="settingsTab">
+            <div class="settings-container">
+                <div class="settings-group">
+                    <h3>Bot Settings</h3>
+                    <div class="setting-item">
+                        <label for="commandPrefix">Command Prefix</label>
+                        <input type="text" id="commandPrefix" value="#">
+                    </div>
+                    <div class="setting-item">
+                        <label for="responseDelay">Response Delay (ms)</label>
+                        <input type="number" id="responseDelay" value="1000">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Indicator -->
+        <div id="loadingIndicator" class="loading-overlay">
+            <div class="loading-spinner"></div>
+        </div>
+    </div>
+</body>
+</html>

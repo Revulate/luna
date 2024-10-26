@@ -1,0 +1,1328 @@
+:root {
+  --primary-color: #6441a5;
+  --secondary-color: #392e5c;
+  --background-color: #0f0f1a;
+  --card-bg: #1a1a2e;
+  --text-color: #ffffff;
+  --text-muted: #8892b0;
+  --border-color: #2d2d4a;
+  --success-color: #4caf50;
+  --warning-color: #ff9800;
+  --error-color: #f44336;
+  --info-color: #2196f3;
+  --shadow-sm: 0 2px 4px rgba(0,0,0,0.1);
+  --shadow-md: 0 4px 6px rgba(0,0,0,0.1);
+  --shadow-lg: 0 10px 15px rgba(0,0,0,0.1);
+  --gradient: linear-gradient(135deg, var(--primary-color), #9147ff);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: var(--background-color);
+  color: var(--text-color);
+  line-height: 1.6;
+}
+
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+/* Header Styles */
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px;
+  background: var(--card-bg);
+  border-radius: 12px;
+  margin-bottom: 24px;
+  box-shadow: var(--shadow-md);
+}
+
+.panel-header h1 {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-color);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.panel-header h1 i {
+  color: var(--primary-color);
+}
+
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+#connectionDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: var(--success-color);
+}
+
+/* Status Dashboard */
+.status-dashboard {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr) !important; /* Force 3 columns for first row */
+  grid-template-rows: auto auto;
+  gap: 15px;
+  margin: 20px 0;
+}
+
+.status-card {
+  background: var(--card-bg);
+  border-radius: 12px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  min-height: 120px;
+  position: relative;
+}
+
+.status-card::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: var(--gradient);
+}
+
+.status-card i {
+  font-size: 1.5em;
+  padding: 12px;
+}
+
+.status-card h3 {
+  font-size: 0.9em;
+  margin-bottom: 5px;
+}
+
+.status-card > div {
+  font-size: 1.2em;
+}
+
+.status-card .additional-stats {
+  font-size: 0.8em;
+  padding-top: 8px;
+}
+
+/* Special styling for bot status */
+#botStatus {
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-size: 1.2em;
+  transition: all 0.3s ease;
+}
+
+#botStatus.status-connected {
+  background: rgba(76, 175, 80, 0.2);
+  color: #4CAF50;
+}
+
+#botStatus.status-disconnected {
+  background: rgba(244, 67, 54, 0.2);
+  color: #F44336;
+}
+
+/* Special styling for channel count */
+#channelCount {
+  font-size: 1.3em;
+  background: linear-gradient(45deg, var(--primary-color), #9147ff);
+  background-clip: text;              /* Add standard property */
+  -webkit-background-clip: text;      /* Keep vendor prefix for Safari */
+  color: transparent;                 /* Use this instead of -webkit-text-fill-color */
+  -webkit-text-fill-color: transparent;  /* Keep for Safari support */
+  font-weight: 700;
+}
+
+/* Special styling for uptime */
+#uptime {
+  font-family: 'Monaco', monospace;
+  font-size: 1.2em;
+  letter-spacing: 0.5px;
+  color: #8892b0;
+}
+
+/* Add hover effects */
+.status-card:hover {
+  transform: translateY(-5px);
+  box-shadow: var(--shadow-lg), 0 8px 25px rgba(100, 65, 165, 0.2);
+}
+
+.status-card:hover i {
+  transform: scale(1.1);
+}
+
+/* Tab Navigation */
+.tab-navigation {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 24px;
+  background: var(--card-bg);
+  padding: 10px;
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.tab-button {
+  padding: 12px 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tab-button i {
+  font-size: 16px;
+}
+
+.tab-button:hover {
+  background: rgba(100, 65, 165, 0.1);
+  color: var(--text-color);
+}
+
+.tab-button.active {
+  background: var(--gradient);
+  color: white;
+}
+
+/* Chat Container */
+.chat-container {
+  background: var(--card-bg);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+}
+
+.chat-header {
+  padding: 16px;
+  background: rgba(0,0,0,0.2);
+  display: flex;
+  gap: 10px;
+}
+
+.chat-messages {
+  height: 500px;
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--card-bg);
+}
+
+.chat-message {
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  animation: fadeIn 0.2s ease;
+}
+
+.chat-input {
+  padding: 16px 20px;
+  background: var(--card-bg);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.chat-input input {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 8px;
+  padding: 12px 16px;
+  color: var(--text-color);
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+
+.chat-input input:focus {
+  outline: none;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 0 2px var(--primary-color);
+}
+
+.chat-input input::placeholder {
+  color: var(--text-muted);
+}
+
+#sendButton {
+  background: var(--primary-color);
+  border: none;
+  border-radius: 8px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  color: white;
+}
+
+#sendButton:hover {
+  background: #7d5bbe;
+  transform: translateY(-1px);
+}
+
+#sendButton:active {
+  transform: translateY(1px);
+}
+
+#sendButton i {
+  font-size: 16px;
+}
+
+/* Add hover effect for input */
+.chat-input:hover input {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+/* Add focus-within effect for the container */
+.chat-input:focus-within {
+  border-top-color: var(--primary-color);
+}
+
+/* Logs Container */
+.logs-container {
+  background: var(--card-bg);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: var(--shadow-lg);
+}
+
+.logs-header {
+  padding: 16px;
+  background: rgba(0,0,0,0.2);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.log-entry {
+  padding: 8px;
+  margin: 4px 0;
+  border-radius: 4px;
+  font-family: 'Monaco', monospace;
+  font-size: 0.9em;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.log-timestamp {
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-size: 0.9em;
+}
+
+.log-level {
+  font-weight: 500;
+  white-space: nowrap;
+  min-width: 60px;
+  text-align: center;
+}
+
+.log-message {
+  word-break: break-word;
+  flex: 1;
+}
+
+.log-metadata {
+  color: var(--text-muted);
+  font-size: 0.8em;
+  font-style: italic;
+  margin-left: 8px;
+}
+
+/* Update log level colors to match logger.js */
+.log-entry.log-error { 
+  color: var(--error-color);
+  background: rgba(244, 67, 54, 0.1);
+}
+
+.log-entry.log-warn { 
+  color: var(--warning-color);
+  background: rgba(255, 152, 0, 0.1);
+}
+
+.log-entry.log-info { 
+  color: var(--info-color);
+  background: rgba(33, 150, 243, 0.1);
+}
+
+.log-entry.log-debug { 
+  color: var(--text-muted);
+  background: rgba(158, 158, 158, 0.1);
+}
+
+.log-entry.log-chat {
+  color: var(--primary-color);
+  background: rgba(100, 65, 165, 0.1);
+}
+
+/* Commands Container */
+.commands-container {
+  background: var(--card-bg);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: var(--shadow-lg);
+}
+
+.add-command-form {
+  display: grid;
+  grid-template-columns: 1fr 2fr auto;
+  gap: 10px;
+  margin-top: 20px;
+  padding: 20px;
+  background: rgba(0,0,0,0.2);
+  border-radius: 8px;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+  0% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.2); opacity: 0.8; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+@keyframes slideIn {
+  from { transform: translateX(-100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes fadeScale {
+  from { transform: scale(0.95); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+@keyframes shimmer {
+  0% { background-position: -1000px 0; }
+  100% { background-position: 1000px 0; }
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .status-dashboard {
+    grid-template-columns: repeat(3, 1fr) !important;
+    gap: 10px;
+  }
+  
+  .status-card {
+    padding: 10px;
+    min-height: 150px;
+  }
+  
+  .status-card i {
+    font-size: 1.2em;
+    padding: 8px;
+  }
+  
+  .status-card h3 {
+    font-size: 0.8em;
+  }
+  
+  .status-card > div {
+    font-size: 1em;
+  }
+  
+  .status-card .additional-stats {
+    font-size: 0.7em;
+  }
+  
+  /* Adjust chat container for mobile */
+  .chat-container {
+    height: calc(100vh - 300px);
+  }
+  
+  .chat-message {
+    font-size: 0.9em;
+    padding: 8px;
+  }
+  
+  .chat-message .timestamp {
+    font-size: 0.7em;
+  }
+  
+  /* Fix nav bar overflow */
+  .tab-navigation {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 5px;
+  }
+  
+  .tab-button {
+    padding: 8px 12px;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 480px) {
+  .status-dashboard {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+  
+  .memory-chart-container {
+    grid-column: 1 / -1;
+    height: 200px;
+  }
+  
+  .chat-message {
+    font-size: 0.8em;
+    padding: 6px;
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255,255,255,0.05);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--primary-color);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #7d5bbe;
+}
+
+/* Loading Animation */
+.loading-indicator {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(15,15,26,0.9);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.spinner {
+  width: 50px;
+  height: 50px;
+  border: 4px solid var(--card-bg);
+  border-top: 4px solid var(--primary-color);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Enhanced styles */
+.pulse {
+  animation: pulse 0.5s ease-in-out;
+}
+
+.update {
+  animation: fadeScale 0.3s ease-out;
+}
+
+.loading {
+  background: linear-gradient(90deg, var(--card-bg) 25%, var(--secondary-color) 50%, var(--card-bg) 75%);
+  background-size: 1000px 100%;
+  animation: shimmer 2s infinite linear;
+}
+
+/* Enhanced card styles */
+.status-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.status-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(135deg, transparent 0%, rgba(255,255,255,0.1) 50%, transparent 100%);
+  transform: translateX(-100%);
+  transition: transform 0.5s;
+}
+
+.status-card:hover::before {
+  transform: translateX(100%);
+}
+
+/* Enhanced chat styles */
+.chat-message {
+  transform-origin: left;
+  transition: all 0.3s ease;
+}
+
+.chat-message:hover {
+  transform: translateX(10px) scale(1.02);
+  background: rgba(255,255,255,0.1);
+}
+
+.chat-badge {
+  transition: transform 0.2s ease;
+}
+
+.chat-badge:hover {
+  transform: scale(1.2);
+}
+
+/* Tab transitions */
+.tab-content {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.tab-content.inactive {
+  opacity: 0;
+  transform: translateY(20px);
+  pointer-events: none;
+}
+
+/* Memory chart container */
+.memory-chart-container {
+  background: var(--card-bg);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: var(--shadow-lg);
+  transition: transform 0.3s ease;
+  height: 300px;
+}
+
+.memory-chart-container:hover {
+  transform: translateY(-5px);
+}
+
+/* Add these to your existing styles */
+.status-value {
+  font-size: 1.2em;
+  font-weight: 500;
+  margin-top: 8px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  transition: all 0.3s ease;
+}
+
+.status-value.connected {
+  background-color: var(--success-color);
+  color: white;
+}
+
+.status-value.disconnected {
+  background-color: var(--error-color);
+  color: white;
+}
+
+/* Add to your existing styles */
+.chat-message.self {
+  background: rgba(100, 65, 165, 0.2);
+}
+
+.chat-message .timestamp {
+  color: var(--text-muted);
+  font-size: 0.8em;
+  margin-right: 8px;
+}
+
+.chat-message .badges {
+  display: inline-flex;
+  gap: 4px;
+  margin-right: 8px;
+}
+
+.chat-message .username {
+  font-weight: 500;
+  margin-right: 8px;
+}
+
+.chat-message .message {
+  word-break: break-word;
+}
+
+/* Log level colors */
+.log-error { color: var(--error-color); }
+.log-warn { color: var(--warning-color); }
+.log-info { color: var(--info-color); }
+.log-debug { color: var(--text-muted); }
+
+/* Add to your existing styles */
+.tab-content {
+  display: none;
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.tab-content.active {
+  display: block;
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.command-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 15px;
+  background: rgba(255,255,255,0.05);
+  margin-bottom: 10px;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.command-item:hover {
+  background: rgba(255,255,255,0.1);
+  transform: translateX(5px);
+}
+
+.command-name {
+  font-weight: 600;
+  color: var(--primary-color);
+}
+
+.command-description {
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+.error-message {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  background-color: var(--error-color);
+  color: white;
+  padding: 12px 24px;
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  animation: slideIn 0.3s ease, fadeOut 0.3s ease 2.7s;
+  z-index: 1000;
+}
+
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.channel-tabs-container {
+  display: flex;
+  align-items: center;
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border-color);
+  padding: 0.5rem;
+  gap: 0.5rem;
+}
+
+.channel-tabs {
+  display: flex;
+  overflow-x: auto;
+  gap: 0.5rem;
+  flex: 1;
+}
+
+.channel-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  background: var(--secondary-color);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.channel-tab.active {
+  background: var(--primary-color);
+}
+
+.channel-name {
+  font-weight: 500;
+}
+
+.close-tab {
+  background: none;
+  border: none;
+  color: var(--text-color);
+  opacity: 0.7;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.close-tab:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.new-tab-button {
+  background: var(--secondary-color);
+  border: none;
+  color: var(--text-color);
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+
+.new-tab-button:hover {
+  background: var(--primary-color);
+}
+
+.channels-container {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.channel-content {
+  height: 100%;
+  overflow-y: auto;
+  padding: 1rem;
+}
+
+.chat-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.chat-message {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.timestamp {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.chat-badge {
+  width: 18px;
+  height: 18px;
+  margin-right: 2px;
+  vertical-align: middle;
+}
+
+.chat-message .username {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chat-message .message {
+  word-break: break-word;
+  flex: 1;
+}
+
+/* Add additional stats display */
+.status-card .additional-stats {
+  font-size: 0.85em; /* Reduce stats size */
+  color: var(--text-muted);
+  margin-top: auto;
+  width: 100%;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Update status dashboard grid for mobile */
+.status-dashboard {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 20px;
+  margin: 20px 0;
+}
+
+@media (max-width: 1200px) {
+  .status-dashboard {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  
+  .status-card {
+    height: 250px; /* Slightly smaller on tablets */
+  }
+}
+
+@media (max-width: 480px) {
+  .status-dashboard {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+  
+  .status-card {
+    height: 200px; /* Further reduce height on phones */
+  }
+  
+  .status-card i {
+    font-size: 1.5em;
+    padding: 12px;
+  }
+}
+
+/* Make memory chart full width */
+.memory-chart-container {
+  grid-column: 1 / -1; /* Span all columns */
+}
+
+/* Adjust card sizes and content */
+.status-card {
+  background: var(--card-bg);
+  border-radius: 12px;
+  padding: 15px;
+  height: auto; /* Let height be determined by content */
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.status-card i {
+  font-size: 1.5em;
+  padding: 12px;
+}
+
+.status-card h3 {
+  font-size: 0.9em;
+  margin-bottom: 5px;
+}
+
+.status-card > div {
+  font-size: 1.2em;
+}
+
+.status-card .additional-stats {
+  font-size: 0.8em;
+  padding-top: 8px;
+}
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+  .status-dashboard {
+    grid-template-columns: repeat(3, 1fr) !important;
+    gap: 10px;
+  }
+
+  .status-card {
+    padding: 10px;
+    min-height: 150px;
+  }
+
+  .status-card i {
+    font-size: 1.2em;
+    padding: 8px;
+  }
+
+  .status-card h3 {
+    font-size: 0.8em;
+  }
+
+  .status-card > div {
+    font-size: 1em;
+  }
+
+  .status-card .additional-stats {
+    font-size: 0.7em;
+  }
+
+  /* Adjust chat container for mobile */
+  .chat-container {
+    height: calc(100vh - 300px);
+  }
+
+  .chat-message {
+    font-size: 0.9em;
+    padding: 8px;
+  }
+
+  .chat-message .timestamp {
+    font-size: 0.7em;
+  }
+
+  /* Fix nav bar overflow */
+  .tab-navigation {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 5px;
+  }
+
+  .tab-button {
+    padding: 8px 12px;
+    white-space: nowrap;
+  }
+}
+
+/* Extra small devices */
+@media (max-width: 480px) {
+  .status-dashboard {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  .memory-chart-container {
+    grid-column: 1 / -1;
+    height: 200px;
+  }
+
+  .chat-message {
+    font-size: 0.8em;
+    padding: 6px;
+  }
+}
+
+/* Update status card styles for better mobile fit */
+.status-card {
+  padding: 12px;
+  min-height: 120px; /* Reduce minimum height */
+  gap: 8px;
+}
+
+/* Make Online status button smaller on mobile */
+.status-value {
+  font-size: 1em;
+  padding: 4px 12px;
+  border-radius: 16px;
+}
+
+/* Adjust memory chart container */
+.memory-chart-container {
+  grid-column: 1 / -1;
+  height: auto;
+  min-height: 200px;
+  padding: 15px;
+}
+
+.memory-chart-container canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Mobile-specific adjustments */
+@media (max-width: 768px) {
+  .status-dashboard {
+    grid-template-columns: repeat(3, 1fr) !important;
+    gap: 8px;
+  }
+
+  .status-card {
+    padding: 8px;
+    min-height: 100px;
+  }
+
+  .status-card i {
+    font-size: 1em;
+    padding: 8px;
+  }
+
+  .status-card h3 {
+    font-size: 0.75em;
+  }
+
+  .status-card > div {
+    font-size: 0.9em;
+  }
+
+  .status-card .additional-stats {
+    font-size: 0.65em;
+    padding-top: 6px;
+  }
+
+  .status-value {
+    font-size: 0.9em;
+    padding: 3px 10px;
+  }
+
+  .memory-chart-container {
+    padding: 10px;
+    margin-top: 8px;
+  }
+}
+
+@media (max-width: 480px) {
+  .status-dashboard {
+    grid-template-columns: repeat(2, 1fr) !important;
+  }
+
+  .memory-chart-container {
+    grid-column: 1 / -1;
+    min-height: 180px;
+  }
+}
+
+/* Update status card layout */
+.status-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 15px;
+}
+
+.status-card i {
+  font-size: 1.2em;
+  color: var(--primary-color);
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(100, 65, 165, 0.1);
+}
+
+.status-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Memory usage stats overlay */
+.memory-stats-overlay {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: rgba(26, 26, 46, 0.9);
+  padding: 8px;
+  border-radius: 8px;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  z-index: 1;
+}
+
+.memory-stats-overlay div {
+  margin: 2px 0;
+}
+
+/* Channel tabs styling */
+.channel-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 10px;
+  background: var(--card-bg);
+  border-radius: 8px;
+  overflow-x: auto;
+  margin-bottom: 10px;
+}
+
+.channel-tab {
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s;
+}
+
+.channel-tab.active {
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
+}
+
+/* Update status card styles */
+.status-card {
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+.card-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.card-header i {
+    color: var(--text-color);
+    font-size: 1.2em;
+}
+
+.card-header h3 {
+    color: var(--text-muted);
+    font-size: 1em;
+    margin: 0;
+}
+
+/* Performance card specific styles */
+.performance-card {
+    grid-column: 1 / -1;
+    padding: 20px;
+}
+
+.performance-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.stat-item {
+    background: var(--secondary-color);
+    padding: 12px;
+    border-radius: 8px;
+    text-align: center;
+}
+
+.memory-chart-section {
+    width: 100%;
+    padding: 0 20px;
+}
+
+.chart-container {
+    width: 100%;
+    height: 300px;
+    position: relative;
+}
+
+/* Channel tab styling with higher specificity */
+.channel-tabs .channel-tab {
+    padding: 8px 16px;
+    border-radius: 6px;
+    background: var(--secondary-color);
+    color: var(--text-muted);
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    position: relative;
+    z-index: 1;
+}
+
+.channel-tabs .channel-tab:hover {
+    background: var(--primary-color);
+    color: var(--text-color);
+    opacity: 0.9;
+}
+
+/* Stronger active state styling */
+.channel-tabs .channel-tab.active {
+    background: var(--primary-color) !important;
+    color: var(--text-color) !important;
+    box-shadow: 0 0 0 2px var(--primary-color) !important;
+    font-weight: 500;
+    z-index: 2;
+}
+
+/* Ensure active state persists */
+.channel-tabs .channel-tab.active:hover {
+    opacity: 1;
+}
+
+/* Add visual indicator for active tab */
+.channel-tabs .channel-tab.active::after {
+    content: '';
+    position: absolute;
+    bottom: -2px;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--text-color);
+    border-radius: 2px;
+}
+
+/* Fix status card spacing */
+.status-card {
+    padding: 15px;
+    min-height: 110px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 8px;
+}
+
+.status-card .card-header {
+    margin: 0;
+    padding: 0;
+}
+
+#botStatus, #uptime {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    margin: 0;
+    padding: 0;
+}
+
+/* Performance section improvements */
+.performance-card {
+    grid-column: 1 / -1;
+}
+
+.memory-chart-section {
+    position: relative;
+    width: 100%;
+    margin-top: 25px;
+    padding: 0 20px;
+}
+
+.memory-chart-section::before {
+    content: 'Memory Usage Over Time';
+    position: absolute;
+    top: -20px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: var(--text-muted);
+    font-size: 0.8em;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.chart-container {
+    width: 100%;
+    height: 300px;
+    position: relative;
+}
+

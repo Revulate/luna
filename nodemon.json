@@ -1,0 +1,17 @@
+{
+    "ignore": [
+      "*.json",
+      "databases/*",
+      "logs/*",
+      "node_modules/*",
+      "tokens.json"
+    ],
+    "ext": "js",
+    "watch": [
+      "*.js",
+      "*.cjs",
+      "commands/*.js",
+      "services/*.js"
+    ],
+    "delay": "5000"
+}
