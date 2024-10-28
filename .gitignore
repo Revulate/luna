@@ -6,12 +6,15 @@ node_modules/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 
 # SQLite database
 tokens.db
 
 # Credentials
 credentials.json
+google-credentials.json
 
 # ffmpeg-static
 ffmpeg-static/  
@@ -40,16 +43,13 @@ ffmpeg-static/
 *.m4s
 *.m4r
 *.m4v
-*.m4p
-*.m4b
-*.m4r
-*.m4v
 
 *.log
 *-audit.json
 *.cursorignore
 
 *.db
+*.db-journal
 *.db-shm
 *.db-wal    
 
@@ -60,3 +60,15 @@ tokens.json
 *.txt
 channel-tokens.json
 package-lock.json
+db/*
+!db/.gitkeep
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
